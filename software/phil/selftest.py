@@ -1,0 +1,116 @@
+"""Hardware self-test for the Phil arm robot.
+
+Verifies, in order:
+  1. controller discovery over USB,
+  2. raw status-packet feedback (the legacy firmware streams 20-byte packets),
+  3. connection via the legacy backend (reset / initialize),
+  4. joint position feedback,
+  5. a small, bounded joint jog with feedback verification, then jog back.
+
+It deliberately does NOT home (homing drives each arm to its limit switch).
+Run from the ``software/`` directory:
+
+    python -m phil.selftest                 # connection + feedback only (no motion)
+    python -m phil.selftest --move          # also do a small bounded joint jog
+    python -m phil.selftest --move --axis Y --usteps 16
+    python -m phil.selftest --simulate --move
+"""
+from __future__ import annotations
+
+import argparse
+import time
+
+import serial
+import serial.tools.list_ports as lp
+
+from .phil_robot import PhilRobot, PhilHandshakeError
+
+LEGACY_MSG_LEN = 20
+
+
+def discover():
+    print("== 1. USB controller discovery ==")
+    found = None
+    for p in lp.comports():
+        is_ctrl = (p.manufacturer == "Teensyduino") or (p.description == "Arduino Due")
+        if p.manufacturer or (p.description not in (None, "n/a")):
+            tag = "  <-- controller" if is_ctrl else ""
+            print(f"   {p.device}  desc={p.description!r} mfg={p.manufacturer!r} "
+                  f"sn={p.serial_number}{tag}")
+        if is_ctrl and found is None:
+            found = p
+    print("   !! no controller found" if found is None else f"   selected: {found.device}")
+    return found
+
+
+def raw_feedback_probe(device, baud=2000000, msg_len=LEGACY_MSG_LEN, n=40):
+    print("\n== 2. Raw feedback probe (controller -> host) ==")
+    try:
+        s = serial.Serial(device, baud, timeout=1)
+    except Exception as e:
+        print(f"   could not open {device}: {e}")
+        return False
+    try:
+        time.sleep(0.5)
+        s.reset_input_buffer()
+        time.sleep(0.3)
+        data = s.read(msg_len * n)
+        statuses = {data[1 + k * msg_len] for k in range(min(n, len(data) // msg_len))}
+        ok = len(data) >= msg_len * 5 and statuses.issubset({0, 1, 2, 3, 4})
+        print(f"   received {len(data)} bytes ({msg_len}-byte packets); "
+              f"status codes seen: {sorted(statuses)}")
+        print(f"   -> feedback streaming: {'PASS' if ok else 'FAIL'}")
+        return ok
+    finally:
+        s.close()
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Phil arm hardware self-test")
+    ap.add_argument("--move", action="store_true", help="perform a small bounded jog")
+    ap.add_argument("--axis", default="X", choices=["X", "Y", "Z"])
+    ap.add_argument("--usteps", type=int, default=16, help="jog size in repo usteps (small!)")
+    ap.add_argument("--simulate", action="store_true")
+    ap.add_argument("--backend", default="legacy", choices=["legacy", "stock", "sim"])
+    args = ap.parse_args(argv)
+
+    if not args.simulate:
+        ctrl = discover()
+        if ctrl is not None:
+            raw_feedback_probe(ctrl.device)
+
+    print("\n== 3. Connect (legacy backend: reset / initialize) ==")
+    bot = PhilRobot(simulate=args.simulate, backend=args.backend)
+    try:
+        bot.connect()
+    except PhilHandshakeError as e:
+        print("   HANDSHAKE FAILED:", e)
+        return 2
+    print("   connected.")
+
+    print("\n== 4. Joint position feedback ==")
+    start = bot.joint_position()
+    print(f"   joints: X={start['X']} Y={start['Y']} Z={start['Z']} usteps")
+
+    if args.move:
+        ax, d = args.axis, args.usteps
+        print(f"\n== 5. Bounded joint jog: {ax} +{d} usteps then back ==")
+        before = bot.joint_position()[ax]
+        bot.jog_joint(**{f"d{ax.lower()}": d})
+        time.sleep(0.3)
+        moved = bot.joint_position()[ax]
+        print(f"   commanded +{d} usteps on {ax}; measured delta = {moved - before:+d} usteps")
+        bot.jog_joint(**{f"d{ax.lower()}": -d})
+        time.sleep(0.3)
+        end = bot.joint_position()[ax]
+        print(f"   jogged back; residual from start on {ax} = {end - before:+d} usteps")
+        print("   -> joint motion + feedback: PASS" if abs(moved - before) > 0 else
+              "   -> no motion detected: CHECK")
+
+    bot.close()
+    print("\nself-test complete.")
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

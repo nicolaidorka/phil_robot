@@ -1,0 +1,49 @@
+# Rules — operating & development
+
+## Safety (physical arm)
+- **Jog small.** Rotary joints, very sensitive (~50 usteps/well). A few hundred
+  usteps crosses the whole plate or runs off the edge. Start with small steps;
+  the `jog_teach` console defaults to multiples of 8 usteps (≈1 mm).
+- **Lift / clearance before big XY moves** if anything is on the deck. `goto`
+  moves XY then sets Z; set a travel Z if you need clearance.
+- **Don't blind-fire HOME / limit-switch homing.** It's unverified on this
+  firmware and could drive an arm into a hard stop. Use manual `sethome` (zeros
+  at the current pose, no motion) instead.
+- When commanding motion you can't see, move in small bounded steps and confirm
+  with the operator.
+
+## Don'ts
+- **Don't hand-move the arms to set a position.** Open-loop, not tracked, and it
+  can lose steps. Position only changes via commanded jogs.
+- **Don't `reset()` / `initialize_drivers()` mid-session on legacy** unless you
+  intend to zero the frame — both wipe the joint counter. (Legacy connect skips
+  them on purpose.)
+- **Don't use `backend="stock"`** on this unit — the 8/24 protocol is rejected.
+  Use `backend="legacy"`.
+- **Don't re-teach after a power-cycle.** Use `reanchor <well>`.
+
+## Day-to-day
+- Run from `software/`. `python3 -m phil.cli`, then `goto <well>`.
+- After a **power-cycle**: jog the outlet over one known well (e.g. A1) and run
+  `reanchor A1`. Calibration restored; no re-teach.
+- Switch plates: `--labware "<name>"` (list with `labware`); geometry maps the
+  new JSON's wells.
+
+## Re-calibration (rare — only if the arm geometry physically changes)
+1. `python3 -m phil.jog_teach` — teach ~10 spread wells (4 corners, 4 edge
+   midpoints, 2 middle). Center the FIRST well and press `h` (home) before Enter.
+   The console auto-approaches later wells; just nudge + Enter. Final approach in
+   one direction (backlash); "over the well" is good enough.
+2. `fitkin` (or it's saved) → fits the 5-bar (aim for RMS < ~0.5 mm).
+3. Test `goto` on a few untaught wells in different regions.
+
+## Development
+- Keep `legacy_mc.py` matching the firmware framing (6/20, CRC-8/CCITT, 256
+  microstepping). If the Teensy is ever reflashed with the repo firmware, switch
+  to `backend="stock"` and the standard `constants.py` units.
+- Optional deps: `scipy` (for `well_map.py` and `kinematics.py`). The package
+  degrades gracefully if absent (falls back to affine).
+- Verify changes in simulation first: `python3 -m phil.cli --simulate` /
+  `python3 -m phil.selftest --simulate --move`.
+- `constants.py` mirrors `control/_def.py`; the rotary "mm" there is nominal —
+  real outlet positions come from the kinematic model, not those constants.
