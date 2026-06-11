@@ -48,9 +48,11 @@ The controller is a Teensy on `/dev/ttyACM1` (auto-detected by manufacturer
   physical spot. Default plate: Eppendorf twin.tec LoBind 96 PCR.
 - **X/Y/Z jog**, teach console (`phil/jog_teach.py`, arrow keys + auto-approach),
   self-test, simulation backend.
-- **Power-cycle recovery**: `reanchor <well>` — jog to one known well, run it,
-  and the whole calibration is restored (geometry is permanent; only the joint
-  counter shifts on power loss). **No re-teaching, ever.**
+- **Power-cycle recovery**: a crash/power loss does **not** require re-teaching.
+  The geometry is permanent; only the joint *counter* shifts. On connect the
+  robot **auto-detects** a likely reset (compares live joints to the last saved
+  pose) and warns; you then jog the outlet over one known well and run
+  `reanchor <well>` — the whole calibration is restored. **No re-teaching, ever.**
 
 ## Critical rules (see [RULES](.claude/RULES.md))
 
@@ -80,7 +82,7 @@ software/phil/
   labware/          bundled plate (default: eppendorf_twintec_lobind_96_pcr)
   custom_labware/   plates copied from ~/ms_sp/custom_labware
   config/           phil_kinematics.json, phil_teach.json, phil_calibration.json,
-                    phil_frame.json (reanchor offset)
+                    phil_frame.json (reanchor offset + power-cycle detection)
 ```
 
 ## Re-calibrating from scratch (only if geometry changes)

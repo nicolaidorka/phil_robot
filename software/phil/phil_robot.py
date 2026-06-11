@@ -128,7 +128,10 @@ class PhilRobot:
         # resets the firmware counters; set via reanchor(), persisted to disk.
         cfg_dir = os.path.dirname(teach_path or DEFAULT_TEACH_PATH)
         self._frame_path = os.path.join(cfg_dir, "phil_frame.json")
-        self.joint_offset = self._load_offset()
+        self.joint_offset = (0.0, 0.0)
+        self._last_joints = None        # last commanded (X,Y) for power-cycle detection
+        self.frame_suspect = False      # True if the counter looks reset on connect
+        self._load_frame()
 
         self.simulate = simulate
         # backend: 'legacy' (this Phil's older 6-byte/20-byte firmware),
@@ -170,6 +173,7 @@ class PhilRobot:
             self.connected = True
             print(f"PhilRobot connected (backend=legacy, frame preserved). "
                   f"{self.teach_table.summary()}")
+            self._check_frame()
             return
 
         self.mc.reset()
@@ -208,6 +212,13 @@ class PhilRobot:
 
     def close(self):
         if self.mc is not None:
+            try:
+                if self.connected and not self.simulate:
+                    j = self.joint_position()      # checkpoint last pose for frame detection
+                    self._last_joints = (j["X"], j["Y"])
+                    self._save_frame()
+            except Exception:
+                pass
             try:
                 self.mc.close()
             finally:
@@ -487,13 +498,45 @@ class PhilRobot:
         return self.teach_table.joint_for_well(well_id, self.plate), "interpolated"
 
     # ----------------------------------------------------- frame re-anchor
-    def _load_offset(self):
+    FRAME_RESET_THRESHOLD = 80          # usteps; bigger jump on connect => reset
+
+    def _load_frame(self):
         try:
             with open(self._frame_path) as f:
                 d = json.load(f)
-            return (float(d.get("dx", 0)), float(d.get("dy", 0)))
+            self.joint_offset = (float(d.get("dx", 0)), float(d.get("dy", 0)))
+            if "last_x" in d and "last_y" in d:
+                self._last_joints = (int(d["last_x"]), int(d["last_y"]))
         except Exception:
-            return (0.0, 0.0)
+            pass
+
+    def _save_frame(self, well=None):
+        d = {"dx": self.joint_offset[0], "dy": self.joint_offset[1]}
+        if self._last_joints is not None:
+            d["last_x"], d["last_y"] = int(self._last_joints[0]), int(self._last_joints[1])
+        if well:
+            d["well"] = well.upper()
+        try:
+            os.makedirs(os.path.dirname(self._frame_path), exist_ok=True)
+            with open(self._frame_path, "w") as f:
+                json.dump(d, f, indent=2)
+        except Exception:
+            pass
+
+    def _check_frame(self):
+        """On connect, flag if the joint counter looks power-cycle-reset."""
+        if self._last_joints is None:
+            return
+        cur = self.joint_position()
+        jump = abs(cur["X"] - self._last_joints[0]) + abs(cur["Y"] - self._last_joints[1])
+        if jump > self.FRAME_RESET_THRESHOLD:
+            self.frame_suspect = True
+            print("  ** WARNING: joint counter moved by "
+                  f"{jump} usteps since last use (expected ~"
+                  f"{self._last_joints}, now ({cur['X']},{cur['Y']})).\n"
+                  "  ** The controller was likely power-cycled. Geometry is intact "
+                  "(no re-teach), but jog the outlet over a known well and run\n"
+                  "  ** `reanchor <well>` before goto, or coordinates will be off.")
 
     def reanchor(self, well_id: str):
         """Recover the joint frame after a power-cycle using ONE known well.
@@ -509,10 +552,9 @@ class PhilRobot:
         raw, _ = self._resolve_raw(well_id)
         now = self.joint_position()
         self.joint_offset = (now["X"] - raw["X"], now["Y"] - raw["Y"])
-        os.makedirs(os.path.dirname(self._frame_path), exist_ok=True)
-        with open(self._frame_path, "w") as f:
-            json.dump({"dx": self.joint_offset[0], "dy": self.joint_offset[1],
-                       "well": well_id.upper()}, f, indent=2)
+        self._last_joints = (now["X"], now["Y"])
+        self.frame_suspect = False
+        self._save_frame(well=well_id)
         print(f"re-anchored on {well_id.upper()}: frame offset "
               f"X={self.joint_offset[0]:+d} Y={self.joint_offset[1]:+d} "
               f"(saved; calibration preserved, no re-teach needed)")
@@ -533,6 +575,9 @@ class PhilRobot:
     def goto_well(self, well_id: str, safe=True):
         """Move to a well: exact taught position, else derived from the metric map."""
         self._require()
+        if self.frame_suspect:
+            print("  ** frame looks power-cycle-reset — `reanchor <well>` first or "
+                  "this move will be off (geometry is fine, no re-teach).")
         tgt, taught = self._resolve_well(well_id)
         travel_z = self.teach_table.travel_z() if safe else None
         print(f"goto {well_id.upper()} [{taught}] -> X={tgt['X']} Y={tgt['Y']} Z={tgt['Z']}")
@@ -543,6 +588,8 @@ class PhilRobot:
         else:
             self._move_joints_to(x=tgt["X"], y=tgt["Y"])  # coordinated XY
             self._move_joints_to(z=tgt["Z"])              # set Z
+        self._last_joints = (tgt["X"], tgt["Y"])          # checkpoint for frame-reset detection
+        self._save_frame(well=well_id)
         return self.joint_position()
 
     def scan_wells(self, well_ids, dwell_s=0.0):

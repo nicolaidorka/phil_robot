@@ -40,7 +40,11 @@ non-obvious things that cost the most time; read before debugging.
   **not** call `reset()`/`initialize_drivers()` — both of which **zero** the
   counter. Motion works without host init (the firmware self-inits at power-on).
 - A **power-cycle** resets the counter → the absolute frame shifts by a constant
-  joint offset. Recover with `reanchor(<well>)` (one well), not a re-teach.
+  joint offset. Recover with `reanchor(<well>)` (one well), not a re-teach. The
+  shift is a pure per-axis translation, so one reference well fully recovers it.
+- PhilRobot saves the last commanded pose (`phil_frame.json`) and on connect
+  compares it to the live joints; a large jump => `frame_suspect` => it warns to
+  reanchor before `goto`. So a crash/power loss is detected, never silent.
 
 ## Units / sensitivity
 - 256 microstepping: commands in full-steps, position reported in microsteps

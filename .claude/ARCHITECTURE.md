@@ -101,4 +101,4 @@ Switching plates = different JSON; the kinematics maps its mm → joints.
 | `phil_kinematics.json` | fitted 5-bar geometry | re-teach + `fitkin` (rare) |
 | `phil_teach.json`      | taught well joints   | teaching |
 | `phil_calibration.json`| affine reference pts | teaching |
-| `phil_frame.json`      | reanchor joint offset| `reanchor` after power-cycle |
+| `phil_frame.json`      | reanchor offset + last pose (power-cycle detect) | `goto`, `reanchor`, close |

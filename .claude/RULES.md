@@ -24,8 +24,9 @@
 
 ## Day-to-day
 - Run from `software/`. `python3 -m phil.cli`, then `goto <well>`.
-- After a **power-cycle**: jog the outlet over one known well (e.g. A1) and run
-  `reanchor A1`. Calibration restored; no re-teach.
+- After a **power-cycle**: on connect the robot warns if the frame looks reset.
+  Jog the outlet over one known well (e.g. A1) and run `reanchor A1`. Calibration
+  restored; **no re-teach**. (Geometry in `phil_kinematics.json` is permanent.)
 - Switch plates: `--labware "<name>"` (list with `labware`); geometry maps the
   new JSON's wells.
 
