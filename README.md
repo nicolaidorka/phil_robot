@@ -60,12 +60,11 @@ software/phil/
   robot.py        PhilRobot: connect, jog, goto_well, teach, reanchor  (core)
   paths.py        single source of truth for config/labware locations
   constants.py    stepper geometry + motion defaults
-  geometry/       well_plate, calibration, kinematics (the solver), well_map
+  cli.py  jog_teach.py  selftest.py   the 3 entry points (python -m phil.<name>)
+  geometry/       well_plate, teach, calibration, kinematics (the solver), well_map
   hardware/       legacy_mc (Teensy 6/20-byte firmware driver)
-  teaching/       teach (table), jog_teach (arrow-key console)
-  cli.py          interactive shell
-  selftest.py     hardware self-test
-  config/ labware/ custom_labware/    JSON state + plate definitions
+  config/         runtime JSON state (teach/calibration/kinematics)
+  labware/        all plate definitions (Opentrons-schema JSON)
 tests/            sim-backend smoke tests  (pytest)
 ```
 

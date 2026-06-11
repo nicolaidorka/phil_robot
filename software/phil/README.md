@@ -44,14 +44,8 @@ Then refit: in the CLI, `fitkin` (or it's saved to `config/phil_kinematics.json`
 
 ## Quick start
 
-Run from the **`software/`** directory:
-
-```bash
-cd software
-python -m phil.cli                 # real hardware (legacy backend)
-python -m phil.cli --simulate      # no hardware; exercise the workflow
-python -m phil.selftest --move     # connection + feedback + tiny jog test
-```
+Install and entry points are in the [project README](../../README.md). Run from the
+**`software/`** directory (e.g. `python -m phil.cli`, `--simulate` for no hardware).
 
 In the shell:
 
@@ -73,16 +67,17 @@ Teach more wells any time (`teach E7`) to refine accuracy where it matters.
 | File | Purpose |
 |------|---------|
 | `robot.py` | `PhilRobot` — connect/jog/teach/`goto_well` with coordinated arm motion; selectable backend (`legacy`/`stock`/`sim`). |
-| `paths.py` | Single source of truth for `config/`, `labware/`, `custom_labware/` locations. |
+| `paths.py` | Single source of truth for `config/` and `labware/` locations. |
 | `constants.py` | mm↔ustep math and motion constants. |
-| `geometry/kinematics.py` | `KinematicModel` — 5-bar geometry fit + inverse kinematics (the primary solver). |
+| `cli.py` | Interactive teach/control shell (`python -m phil.cli`). |
+| `jog_teach.py` | Arrow-key jog + teach console, auto-approach (`python -m phil.jog_teach`). |
+| `selftest.py` | Hardware self-test (`python -m phil.selftest`). |
 | `geometry/well_plate.py` | `WellPlate` — loads the labware JSON, well↔(row,col) mapping. |
+| `geometry/teach.py` | `TeachTable` — per-well joint positions + corner interpolation, save/load. |
 | `geometry/calibration.py` | Affine calibration fallback. |
+| `geometry/kinematics.py` | `KinematicModel` — 5-bar geometry fit + inverse kinematics (the primary solver). |
 | `geometry/well_map.py` | RBF curve-fit fallback (needs scipy). |
 | `hardware/legacy_mc.py` | `LegacyMicrocontroller` — speaks this Phil's 6-byte/20-byte firmware (threaded reader, unit conversion to repo usteps). |
-| `teaching/teach.py` | `TeachTable` — per-well joint positions + corner interpolation, save/load. |
-| `teaching/jog_teach.py` | Arrow-key jog + teach console (auto-approach). `jog_teach.py` at top is a shim. |
-| `cli.py` / `selftest.py` | Interactive teach shell / hardware self-test. |
 
 ## Firmware protocol (this Teensy)
 

@@ -19,24 +19,28 @@ def test_public_api_imports():
         TeachTable,
     )
     assert phil.constants is not None
-    # subpackage entry points resolve
-    from phil.geometry import WellPlate as _WP, Calibration as _Cal  # noqa: F401
-    from phil.teaching import TeachTable as _TT  # noqa: F401
+    # subpackage entry points resolve (teach is a model, lives in geometry/)
+    from phil.geometry import WellPlate as _WP, Calibration as _Cal, TeachTable as _TT  # noqa: F401
 
 
 def test_no_import_cycle_jog_teach():
-    # jog_teach imports phil.robot, which imports phil.teaching.teach.
-    # If teaching/__init__ ever eagerly imports jog_teach, `import phil` breaks.
+    # jog_teach (root entry point) imports phil.robot, which imports phil.geometry.teach.
+    # If geometry/__init__ ever eagerly imported jog_teach, `import phil` would break.
     import phil  # noqa: F401
-    from phil.teaching import jog_teach
-    assert callable(jog_teach.main)
+    import phil.jog_teach
+    assert callable(phil.jog_teach.main)
 
 
 def test_labware_loads_from_package_data():
     from phil import WellPlate
+    from phil.geometry.well_plate import available_labware
     plate = WellPlate.load()                 # default plate via phil.paths
     x, y = plate.local_xy("A1")
     assert isinstance(x, float) and isinstance(y, float)
+    # a merged "custom" plate still resolves by name from the single labware/ dir
+    p384 = WellPlate.load("thermofisher_60180p109_384_wellplate_30ul")
+    assert len(p384) > 96
+    assert len(available_labware()) >= 9
 
 
 def test_sim_predicts_taught_and_untaught_wells():

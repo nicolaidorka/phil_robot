@@ -17,8 +17,8 @@ from dataclasses import dataclass
 
 _WELL_RE = re.compile(r"^([A-Za-z]+)([0-9]+)$")
 
-# Labware search dirs (custom_labware first) and the default plate live in phil.paths.
-# Search order: custom_labware (copied from ~/ms_sp) then bundled labware/.
+# Labware search dirs and the default plate live in phil.paths. All plate JSON
+# (bundled + user-added) lives in one labware/ folder.
 # Default plate physically on Phil: Eppendorf twin.tec LoBind 96 PCR.
 from ..paths import LABWARE_DIRS, DEFAULT_LABWARE
 
@@ -27,7 +27,7 @@ def resolve_labware(name_or_path: str) -> str:
     """Resolve a labware reference to a JSON path.
 
     Accepts a direct path, or a name/loadName/displayName (with or without the
-    .json extension) found in the custom_labware / labware folders.
+    .json extension) found in the labware folder.
     """
     if os.path.isfile(name_or_path):
         return name_or_path

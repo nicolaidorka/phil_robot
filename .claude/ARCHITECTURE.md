@@ -3,7 +3,7 @@
 ## Layers (top to bottom)
 
 ```
-cli.py / teaching.jog_teach / selftest.py   user surfaces
+cli.py / jog_teach.py / selftest.py   user surfaces (entry points at root)
         |
 PhilRobot (robot.py)              high-level: connect, jog, goto_well, teach, reanchor
         |        \
@@ -11,14 +11,14 @@ PhilRobot (robot.py)              high-level: connect, jog, goto_well, teach, re
         |              \
 geometry.kinematics   hardware.legacy_mc (LegacyMicrocontroller)
 geometry.well_map / geometry.calibration    |
-teaching.teach / geometry.well_plate     Teensy firmware over USB serial
+geometry.teach / geometry.well_plate     Teensy firmware over USB serial
 ```
 
-Package layout: `robot.py` + `paths.py` + `constants.py` at the top; models in
-`geometry/` (well_plate, calibration, kinematics, well_map); driver in
-`hardware/` (legacy_mc); teach surfaces in `teaching/` (teach, jog_teach).
-All data-file paths resolve through `phil/paths.py` (so modules can live in
-subpackages while `config/`, `labware/`, `custom_labware/` stay at the package root).
+Package layout: `robot.py` + `paths.py` + `constants.py` and the three entry points
+(`cli.py`, `jog_teach.py`, `selftest.py`) at the top; well->joint models in
+`geometry/` (well_plate, teach, calibration, kinematics, well_map); driver in
+`hardware/` (legacy_mc). All data-file paths resolve through `phil/paths.py` (so modules
+can live in subpackages while `config/` and `labware/` stay at the package root).
 
 ## The mechanism
 
@@ -95,8 +95,8 @@ uses, so PhilRobot is backend-agnostic (`backend="legacy"|"stock"|"sim"`).
 
 ## Labware (`well_plate.py`)
 
-Opentrons-schema JSON. `WellPlate.load(name_or_path)` resolves by name from
-`custom_labware/` then `labware/`. `local_xy(well)` gives plate-local mm. The
+Opentrons-schema JSON. `WellPlate.load(name_or_path)` resolves by name from the
+single `labware/` folder (all plate JSON lives there). `local_xy(well)` gives plate-local mm. The
 default is the Eppendorf twin.tec LoBind 96 PCR (the plate physically on Phil).
 Switching plates = different JSON; the kinematics maps its mm → joints.
 

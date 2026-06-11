@@ -6,5 +6,6 @@ by ``phil.robot`` under try/except, so importing this subpackage never requires 
 """
 from .well_plate import WellPlate, Well
 from .calibration import Calibration, ReferencePoint
+from .teach import TeachTable
 
-__all__ = ["WellPlate", "Well", "Calibration", "ReferencePoint"]
+__all__ = ["WellPlate", "Well", "Calibration", "ReferencePoint", "TeachTable"]

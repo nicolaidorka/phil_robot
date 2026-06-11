@@ -35,7 +35,7 @@ import time
 from . import constants as C
 from . import paths
 from .geometry.calibration import Calibration
-from .teaching.teach import TeachTable, DEFAULT_TEACH_PATH
+from .geometry.teach import TeachTable, DEFAULT_TEACH_PATH
 from .geometry.well_plate import WellPlate
 
 try:

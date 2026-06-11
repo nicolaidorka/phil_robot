@@ -13,7 +13,7 @@ dependencies = ["numpy", "scipy", "pyserial"]
 
 [project.scripts]
 phil = "phil.cli:main"
-phil-teach = "phil.teaching.jog_teach:main"
+phil-teach = "phil.jog_teach:main"
 phil-selftest = "phil.selftest:main"
 
 [tool.setuptools]
@@ -27,7 +27,7 @@ include = ["phil*"]
 [tool.setuptools.package-data]
 # Ship only IMMUTABLE reference data. config/*.json is mutable runtime state
 # (written by save()); it stays in-place under an editable install.
-phil = ["labware/*.json", "custom_labware/*.json"]
+phil = ["labware/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
