@@ -41,12 +41,12 @@ The controller is a Teensy on `/dev/ttyACM1` (auto-detected by manufacturer
 ## What works
 
 - **`goto <any well>`** — joints computed from the fitted **5-bar kinematics**
-  (`phil/kinematics.py`), no per-well teaching. Verified on hardware (A1, E6,
+  (`phil/geometry/kinematics.py`), no per-well teaching. Verified on hardware (A1, E6,
   B10, G9). `goto` priority: kinematics → RBF map → exact taught → affine.
 - **Any labware from its JSON** — `--labware "<name>"`; wells come from the
   plate's JSON mm through the same geometry. Assumes the plate sits in the same
   physical spot. Default plate: Eppendorf twin.tec LoBind 96 PCR.
-- **X/Y/Z jog**, teach console (`phil/jog_teach.py`, arrow keys + auto-approach),
+- **X/Y/Z jog**, teach console (`phil/teaching/jog_teach.py`, arrow keys + auto-approach),
   self-test, simulation backend.
 - **Startup/shutdown check habit**: **A1 is the anchor well.** The CLI verifies
   on A1 at startup (`check`) and parks on A1 at shutdown, so you always confirm
@@ -75,18 +75,25 @@ The controller is a Teensy on `/dev/ttyACM1` (auto-detected by manufacturer
 
 ```
 software/phil/
-  kinematics.py     5-bar geometry fit + inverse kinematics  <- the solution
-  phil_robot.py     PhilRobot: connect, jog, goto_well, teach, reanchor
-  legacy_mc.py      driver for this Teensy's 6-byte/20-byte firmware
-  well_plate.py     loads labware JSON (by name from labware/ + custom_labware/)
-  teach.py          teach table (per-well joint positions)
-  well_map.py       RBF curve-fit fallback (needs scipy)
-  calibration.py    affine fallback
-  jog_teach.py      arrow-key teach console (auto-approach)
-  cli.py            interactive shell;  selftest.py;  constants.py
-  labware/          bundled plate (default: eppendorf_twintec_lobind_96_pcr)
-  custom_labware/   plates copied from ~/ms_sp/custom_labware
-  config/           phil_kinematics.json, phil_teach.json, phil_calibration.json,
+  robot.py              PhilRobot: connect, jog, goto_well, teach, reanchor  <- core
+  paths.py              single source of truth for config/labware locations
+  constants.py          stepper geometry + motion defaults
+  geometry/             mm <-> joint models
+    kinematics.py         5-bar geometry fit + inverse kinematics  <- the solution
+    well_plate.py         loads labware JSON (by name from labware/ + custom_labware/)
+    calibration.py        affine fallback
+    well_map.py           RBF curve-fit fallback (needs scipy)
+  hardware/
+    legacy_mc.py          driver for this Teensy's 6-byte/20-byte firmware
+  teaching/
+    teach.py              teach table (per-well joint positions)
+    jog_teach.py          arrow-key teach console (auto-approach)
+  cli.py                interactive shell
+  selftest.py           hardware self-test
+  jog_teach.py          shim -> teaching.jog_teach (keeps `python -m phil.jog_teach`)
+  labware/              bundled plate (default: eppendorf_twintec_lobind_96_pcr)
+  custom_labware/       plates copied from ~/ms_sp/custom_labware
+  config/               phil_kinematics.json, phil_teach.json, phil_calibration.json,
                     phil_frame.json (reanchor offset + power-cycle detection)
 ```
 

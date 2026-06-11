@@ -3,16 +3,22 @@
 ## Layers (top to bottom)
 
 ```
-CLI / jog_teach / selftest        user surfaces
+cli.py / teaching.jog_teach / selftest.py   user surfaces
         |
-PhilRobot (phil_robot.py)         high-level: connect, jog, goto_well, teach, reanchor
+PhilRobot (robot.py)              high-level: connect, jog, goto_well, teach, reanchor
         |        \
   well resolution  motion
         |              \
-KinematicModel      LegacyMicrocontroller (legacy_mc.py)
-WellMap / Calibration       |
-TeachTable / WellPlate   Teensy firmware over USB serial
+geometry.kinematics   hardware.legacy_mc (LegacyMicrocontroller)
+geometry.well_map / geometry.calibration    |
+teaching.teach / geometry.well_plate     Teensy firmware over USB serial
 ```
+
+Package layout: `robot.py` + `paths.py` + `constants.py` at the top; models in
+`geometry/` (well_plate, calibration, kinematics, well_map); driver in
+`hardware/` (legacy_mc); teach surfaces in `teaching/` (teach, jog_teach).
+All data-file paths resolve through `phil/paths.py` (so modules can live in
+subpackages while `config/`, `labware/`, `custom_labware/` stay at the package root).
 
 ## The mechanism
 

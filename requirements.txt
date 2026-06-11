@@ -1,0 +1,5 @@
+# Runtime dependencies for the phil package.
+# Install editable:  pip install -e .
+numpy
+scipy
+pyserial

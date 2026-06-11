@@ -5,10 +5,10 @@ robot (which runs on the Squid microcontroller firmware).
 
     from phil import PhilRobot, WellPlate, Calibration
 """
-from .well_plate import WellPlate, Well
-from .calibration import Calibration, ReferencePoint
-from .teach import TeachTable
-from .phil_robot import PhilRobot, SimulatedBackend, PhilHandshakeError
+from .geometry.well_plate import WellPlate, Well
+from .geometry.calibration import Calibration, ReferencePoint
+from .teaching.teach import TeachTable
+from .robot import PhilRobot, SimulatedBackend, PhilHandshakeError
 from . import constants
 
 __all__ = [

@@ -1,3 +1,12 @@
 .DS_Store
 *.pyc 
 *.xml
+
+# Phil runtime frame state
+software/phil/config/phil_frame.json
+
+# Python build / editable-install artifacts
+*.egg-info/
+build/
+dist/
+__pycache__/

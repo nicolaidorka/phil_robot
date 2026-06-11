@@ -36,12 +36,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import constants as C
+from .. import constants as C
 from .well_plate import WellPlate
-
-DEFAULT_CALIBRATION = os.path.join(
-    os.path.dirname(__file__), "config", "phil_calibration.json"
-)
+from ..paths import DEFAULT_CALIBRATION
 
 
 @dataclass

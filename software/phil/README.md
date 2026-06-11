@@ -72,13 +72,16 @@ Teach more wells any time (`teach E7`) to refine accuracy where it matters.
 
 | File | Purpose |
 |------|---------|
-| `legacy_mc.py` | `LegacyMicrocontroller` — speaks this Phil's 6-byte/20-byte firmware (threaded reader, unit conversion to repo usteps). |
-| `phil_robot.py` | `PhilRobot` — connect/jog/teach/`goto_well` with coordinated arm motion; selectable backend (`legacy`/`stock`/`sim`). |
-| `teach.py` | `TeachTable` — per-well joint positions + corner interpolation, save/load. |
-| `well_plate.py` | `WellPlate` — loads the labware JSON, well↔(row,col) mapping. |
-| `labware/corning_96_wellplate_360ul_flat.json` | 96-well plate geometry (used for the well grid / interpolation). |
-| `calibration.py` | Affine Cartesian calibration — kept for a true XY-stage Phil; not used by the articulated arm. |
+| `robot.py` | `PhilRobot` — connect/jog/teach/`goto_well` with coordinated arm motion; selectable backend (`legacy`/`stock`/`sim`). |
+| `paths.py` | Single source of truth for `config/`, `labware/`, `custom_labware/` locations. |
 | `constants.py` | mm↔ustep math and motion constants. |
+| `geometry/kinematics.py` | `KinematicModel` — 5-bar geometry fit + inverse kinematics (the primary solver). |
+| `geometry/well_plate.py` | `WellPlate` — loads the labware JSON, well↔(row,col) mapping. |
+| `geometry/calibration.py` | Affine calibration fallback. |
+| `geometry/well_map.py` | RBF curve-fit fallback (needs scipy). |
+| `hardware/legacy_mc.py` | `LegacyMicrocontroller` — speaks this Phil's 6-byte/20-byte firmware (threaded reader, unit conversion to repo usteps). |
+| `teaching/teach.py` | `TeachTable` — per-well joint positions + corner interpolation, save/load. |
+| `teaching/jog_teach.py` | Arrow-key jog + teach console (auto-approach). `jog_teach.py` at top is a shim. |
 | `cli.py` / `selftest.py` | Interactive teach shell / hardware self-test. |
 
 ## Firmware protocol (this Teensy)

@@ -17,13 +17,10 @@ from dataclasses import dataclass
 
 _WELL_RE = re.compile(r"^([A-Za-z]+)([0-9]+)$")
 
-_HERE = os.path.dirname(__file__)
-# Search dirs for labware-by-name: custom_labware (copied from ~/ms_sp) first.
-LABWARE_DIRS = [os.path.join(_HERE, "custom_labware"), os.path.join(_HERE, "labware")]
-
-# The plate physically on the Phil robot: Eppendorf twin.tec LoBind 96 PCR
-# (exported from the Opentrons custom-labware library, ~/ms_sp/custom_labware).
-DEFAULT_LABWARE = os.path.join(_HERE, "labware", "eppendorf_twintec_lobind_96_pcr.json")
+# Labware search dirs (custom_labware first) and the default plate live in phil.paths.
+# Search order: custom_labware (copied from ~/ms_sp) then bundled labware/.
+# Default plate physically on Phil: Eppendorf twin.tec LoBind 96 PCR.
+from ..paths import LABWARE_DIRS, DEFAULT_LABWARE
 
 
 def resolve_labware(name_or_path: str) -> str:

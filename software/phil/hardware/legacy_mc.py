@@ -16,7 +16,7 @@ Because the command payload is only 3 bytes, positions are sent as a 24-bit
 signed value (vs the repo's 32-bit).
 
 This class implements the subset of the Microcontroller interface that
-:class:`phil.phil_robot.PhilRobot` uses, with a background read thread that
+:class:`phil.robot.PhilRobot` uses, with a background read thread that
 keeps byte-alignment on the delimiter-less 20-byte stream.
 """
 from __future__ import annotations

@@ -15,7 +15,8 @@ from __future__ import annotations
 import json
 import os
 
-DEFAULT_TEACH_PATH = os.path.join(os.path.dirname(__file__), "config", "phil_teach.json")
+from ..paths import DEFAULT_TEACH_PATH  # re-exported so callers keep importing it from here
+
 CORNERS = ("A1", "A12", "H1", "H12")
 
 

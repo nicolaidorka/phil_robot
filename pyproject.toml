@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phil-robot"
+version = "0.1.0"
+description = "Phil — calibrated 5-bar arm well-plate navigation (teach + inverse kinematics)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = ["numpy", "scipy", "pyserial"]
+
+[project.scripts]
+phil = "phil.cli:main"
+phil-teach = "phil.teaching.jog_teach:main"
+phil-selftest = "phil.selftest:main"
+
+[tool.setuptools]
+# The package lives under software/phil (the Squid layout is preserved).
+package-dir = { "" = "software" }
+
+[tool.setuptools.packages.find]
+where = ["software"]
+include = ["phil*"]
+
+[tool.setuptools.package-data]
+# Ship only IMMUTABLE reference data. config/*.json is mutable runtime state
+# (written by save()); it stays in-place under an editable install.
+phil = ["labware/*.json", "custom_labware/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

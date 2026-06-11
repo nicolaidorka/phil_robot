@@ -41,7 +41,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .phil_robot import PhilRobot, PhilHandshakeError
+from .robot import PhilRobot, PhilHandshakeError
 
 
 def _jfmt(p: dict) -> str:
@@ -99,11 +99,11 @@ class PhilShell:
             elif cmd == "check":
                 bot.check(args[0] if args else None)      # default A1
             elif cmd == "predict":
-                from .well_plate import WellPlate
+                from .geometry.well_plate import WellPlate
                 pl = WellPlate.load(" ".join(args[1:])) if len(args) > 1 else None
                 print(_jfmt(bot.predict_well(args[0], plate=pl)))
             elif cmd == "labware":
-                from .well_plate import available_labware
+                from .geometry.well_plate import available_labware
                 print("current:", bot.plate.display_name)
                 print("available:")
                 for n in available_labware():

@@ -1,39 +1,81 @@
-# Squid (formerly octopi-research)
+# Phil — 5-bar arm well-plate navigation
 
-![alt text](https://i.imgur.com/Gjwh02y.png)
+Phil is an **articulated 5-bar arm robot** that holds one outlet/nozzle over a
+96-well plate. It drives any well of any labware from its JSON definition, using
+a fitted **5-bar inverse-kinematic model** — no per-well teaching once calibrated.
 
-## Introduction
-Squid (Simplifying Quantitive Imaging Development and Deployment) provides a full suite of hardware and software components for rapidly configuring high-performance microscopes tailored to users' applications with reduced cost, effort and turnaround time. Besides increasing accessibility of research microscopes and available microscope hours to labs, it is also designed to simplify development and dissemination of new or otherwise advanced microscopy techniques.
+> Phil is **not** a microscope. It reuses the Squid/octopi codebase only for the
+> Teensy motor firmware; the control software here is the self-contained `phil`
+> package. See [`software/phil/README.md`](software/phil/README.md) for the
+> module reference and [`CLAUDE.md`](CLAUDE.md) / [`.claude/`](.claude/) for
+> operating notes and the mechanism description.
 
-Applications include
-- slide scanner for digital pathology
-- time lapse imaging with 2D or 3D tiling
-- spatial omics that involves multicolor and multi-round imaging
-- tracking microscopy
-- computational microscopy, including label free microscopy using phase/polarization/reflectance + deep learning
-- super resolution microscopy
-- light sheet microscopy
+## How it works
 
-## Assets
-- main software repo: [GitHub](https://github.com/hongquanli/octopi-research) (this repo)
-- tracking software repo: [GitHub](https://github.com/prakashlab/squid-tracking)
-- CAD models/photos of assembled squids: [Google Drive](https://drive.google.com/drive/folders/1JdVp34HtERGpBCBlFX6jFDwMUdeBLCEx?usp=sharing)
-- BOM for the microscope, including CAD files for CNC machining: [link](https://docs.google.com/spreadsheets/d/1WA64HySj9I7XROtTXuaRvjlbhHXRGspvoxb_20CWDR8/edit?usp=drivesdk)
-- BOM for the multicolor laser engine: [link](https://docs.google.com/spreadsheets/d/1hEM6PsxZPTp1LY3cpxUJOS3Q1YLQN-xniF33ZddFj9U/edit#gid=1175873468)
-- BOM for the control panel: [link](https://docs.google.com/spreadsheets/d/1z2HjibIG9PHffiDsbuzQXmvf2gSFMduHrXkPwDbcXRY/edit?usp=sharing)
+- **X and Y are rotary arm joints** (two base motors, each driving a link; the
+  two links meet at the outlet). **Z** is vertical. Open-loop steppers, no
+  encoders, ~1–2 mm precision floor.
+- A handful of taught wells fit the arm's geometry (link lengths, pivots) to
+  ~0.2 mm RMS; inverse kinematics then computes joints for **any** well, at the
+  edges too. Resolution order: kinematics → RBF map → exact taught → affine.
+- Any Opentrons-style labware JSON works — well mm-coordinates flow through the
+  same geometry.
 
-## Early Results, Related Work and Possible Applications
-Refer to our website: www.squid-imaging.org
+## Install
 
-## References
-[1] Hongquan Li, Deepak Krishnamurthy, Ethan Li, Pranav Vyas, Nibha Akireddy, Chew Chai, Manu Prakash, "**Squid: Simplifying Quantitative Imaging Platform Development and Deployment**." BiorXiv [ link | [website](https://squid-imaging.org)]
+```bash
+pip install -e .          # editable install (recommended; keeps config/ writable)
+```
 
-For scale-free vertical tracking microscopy, check out our work at:
+This exposes console scripts `phil`, `phil-teach`, `phil-selftest`. You can also
+run in place from the `software/` directory without installing:
 
-[2] Deepak Krishnamurthy, Hongquan Li, François Benoit du Rey, Pierre Cambournac, Adam G. Larson, Ethan Li, and Manu Prakash. "**Scale-free vertical tracking microscopy.**" Nature Methods 17, no. 10 (2020): 1040-1051. [ [link](https://www.nature.com/articles/s41592-020-0924-7) | [website](https://gravitymachine.org) ]
+```bash
+cd software
+python -m phil.cli                 # interactive control (real hardware)
+python -m phil.cli --simulate      # no hardware
+python -m phil.selftest --move     # connection + feedback + tiny jog
+python -m phil.jog_teach           # guided teach console
+```
+
+Dependencies: `numpy`, `scipy`, `pyserial` (see `requirements.txt`). scipy is
+optional at import time — the sim backend and affine fallback work without it.
+Real hardware backends (`legacy`/`stock`) additionally need the Squid `control`
+package on `sys.path`.
+
+## Usage
+
+```python
+from phil import PhilRobot
+bot = PhilRobot(backend="legacy")   # legacy = this Teensy's older firmware
+bot.connect()
+bot.goto_well("B10")
+bot.close()
+```
+
+## Package layout
+
+```
+software/phil/
+  robot.py        PhilRobot: connect, jog, goto_well, teach, reanchor  (core)
+  paths.py        single source of truth for config/labware locations
+  constants.py    stepper geometry + motion defaults
+  geometry/       well_plate, calibration, kinematics (the solver), well_map
+  hardware/       legacy_mc (Teensy 6/20-byte firmware driver)
+  teaching/       teach (table), jog_teach (arrow-key console)
+  cli.py          interactive shell
+  selftest.py     hardware self-test
+  config/ labware/ custom_labware/    JSON state + plate definitions
+tests/            sim-backend smoke tests  (pytest)
+```
+
+## Tests
+
+```bash
+pytest -q          # sim backend only; no hardware required
+```
 
 ## Acknowledgement
-The Squid software was developed with structuring inspiration from [Tempesta-RedSTED](https://github.com/jonatanalvelid/Tempesta-RedSTED). The laser engine is inspired by [https://github.com/ries-lab/LaserEngine](https://github.com/ries-lab/LaserEngine). 
 
-## Software Instructions
-The microscope is controled by an Arduino Due and a computer running Ubuntu. The computer can be one of the Nvidia Jetson platforms (e.g. Jetson Nano, Jetson Xavier NX) or a regular laptop/workstation. Instructions for using the firmware and software can be found in the respective folders.
+Built on the [Squid](https://github.com/hongquanli/octopi-research) firmware/
+controller stack.

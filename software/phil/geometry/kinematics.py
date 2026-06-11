@@ -25,7 +25,7 @@ import os
 import numpy as np
 from scipy.optimize import least_squares
 
-DEFAULT_KIN_PATH = os.path.join(os.path.dirname(__file__), "config", "phil_kinematics.json")
+from ..paths import DEFAULT_KIN_PATH
 _TWO_PI = 2.0 * np.pi
 
 

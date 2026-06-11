@@ -23,7 +23,7 @@ import time
 import serial
 import serial.tools.list_ports as lp
 
-from .phil_robot import PhilRobot, PhilHandshakeError
+from .robot import PhilRobot, PhilHandshakeError
 
 LEGACY_MSG_LEN = 20
 

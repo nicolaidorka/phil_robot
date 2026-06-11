@@ -33,16 +33,17 @@ import os
 import time
 
 from . import constants as C
-from .calibration import Calibration
-from .teach import TeachTable, DEFAULT_TEACH_PATH
-from .well_plate import WellPlate
+from . import paths
+from .geometry.calibration import Calibration
+from .teaching.teach import TeachTable, DEFAULT_TEACH_PATH
+from .geometry.well_plate import WellPlate
 
 try:
-    from .well_map import WellMap          # needs scipy; optional
+    from .geometry.well_map import WellMap          # needs scipy; optional
 except Exception:                          # pragma: no cover
     WellMap = None
 try:
-    from .kinematics import KinematicModel  # needs scipy; optional
+    from .geometry.kinematics import KinematicModel  # needs scipy; optional
 except Exception:                          # pragma: no cover
     KinematicModel = None
 
@@ -126,8 +127,8 @@ class PhilRobot:
         self.kin_model = KinematicModel.load() if KinematicModel else None
         # joint-frame offset (X,Y) to recover the calibration after a power-cycle
         # resets the firmware counters; set via reanchor(), persisted to disk.
-        cfg_dir = os.path.dirname(teach_path or DEFAULT_TEACH_PATH)
-        self._frame_path = os.path.join(cfg_dir, "phil_frame.json")
+        cfg_dir = os.path.dirname(teach_path or paths.DEFAULT_TEACH_PATH)
+        self._frame_path = os.path.join(cfg_dir, paths.FRAME_FILENAME)
         self.joint_offset = (0.0, 0.0)
         self._last_joints = None        # last commanded (X,Y) for power-cycle detection
         self.frame_suspect = False      # True if the counter looks reset on connect
@@ -158,7 +159,7 @@ class PhilRobot:
         if self.backend == "sim":
             self.mc = SimulatedBackend()
         elif self.backend == "legacy":
-            from .legacy_mc import LegacyMicrocontroller
+            from .hardware.legacy_mc import LegacyMicrocontroller
             self.mc = LegacyMicrocontroller(
                 version=self._controller_version, sn=self._controller_sn)
         else:
