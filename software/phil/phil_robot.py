@@ -524,28 +524,48 @@ class PhilRobot:
             pass
 
     def _check_frame(self):
-        """On connect, flag if the joint counter looks power-cycle-reset."""
-        if self._last_joints is None:
-            return
+        """On connect: report the position check (habit), flag a likely reset."""
         cur = self.joint_position()
+        if self._last_joints is None:
+            print(f"  position check: joints ({cur['X']},{cur['Y']}); no previous "
+                  "pose on record. Run `check` to verify against A1.")
+            return
         jump = abs(cur["X"] - self._last_joints[0]) + abs(cur["Y"] - self._last_joints[1])
         if jump > self.FRAME_RESET_THRESHOLD:
             self.frame_suspect = True
-            print("  ** WARNING: joint counter moved by "
-                  f"{jump} usteps since last use (expected ~"
-                  f"{self._last_joints}, now ({cur['X']},{cur['Y']})).\n"
-                  "  ** The controller was likely power-cycled. Geometry is intact "
-                  "(no re-teach), but jog the outlet over a known well and run\n"
-                  "  ** `reanchor <well>` before goto, or coordinates will be off.")
+            print(f"  position check: ** MISMATCH ** now ({cur['X']},{cur['Y']}) vs "
+                  f"last ({self._last_joints[0]},{self._last_joints[1]}), moved {jump} usteps.\n"
+                  "  ** Likely a power-cycle or bump. Geometry is intact (NO re-teach):\n"
+                  f"  ** jog the outlet over {self.ANCHOR_WELL} and run "
+                  f"`reanchor {self.ANCHOR_WELL}` before goto.")
+        else:
+            print(f"  position check: OK — joints ({cur['X']},{cur['Y']}) match the "
+                  f"last session ({jump} usteps drift). Frame looks intact.")
 
-    def reanchor(self, well_id: str):
-        """Recover the joint frame after a power-cycle using ONE known well.
+    ANCHOR_WELL = "A1"   # standard reference well for reanchor / check
 
-        Jog the outlet over ``well_id``, then call this. It compares the live
-        joints to where the permanent geometry says that well is, stores the
-        constant offset, and every ``goto`` is corrected from then on -- so the
-        calibration never has to be re-taught.
+    def check(self, well_id: str = None):
+        """Go to the anchor well so you can visually verify the calibration.
+
+        Use after a suspected bump/power event: if the outlet is NOT centered on
+        the well, run ``reanchor`` to recover (no re-teach needed).
         """
+        well_id = (well_id or self.ANCHOR_WELL)
+        self.goto_well(well_id)
+        print(f"  CHECK: is the outlet centered on {well_id.upper()}?  "
+              f"If yes, calibration is good. If not, jog onto it and run "
+              f"`reanchor {well_id.upper()}`.")
+        return self.joint_position()
+
+    def reanchor(self, well_id: str = None):
+        """Recover the joint frame after a power-cycle or bump using ONE well.
+
+        Jog the outlet over ``well_id`` (default A1, the anchor well), then call
+        this. It compares the live joints to where the permanent geometry says
+        that well is, stores the constant offset, and every ``goto`` is corrected
+        from then on -- so the calibration never has to be re-taught.
+        """
+        well_id = well_id or self.ANCHOR_WELL
         self._require()
         if not (self.kin_model and self.kin_model.is_fitted):
             raise RuntimeError("no kinematic model fitted; nothing to re-anchor to")

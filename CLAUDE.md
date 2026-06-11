@@ -48,11 +48,16 @@ The controller is a Teensy on `/dev/ttyACM1` (auto-detected by manufacturer
   physical spot. Default plate: Eppendorf twin.tec LoBind 96 PCR.
 - **X/Y/Z jog**, teach console (`phil/jog_teach.py`, arrow keys + auto-approach),
   self-test, simulation backend.
-- **Power-cycle recovery**: a crash/power loss does **not** require re-teaching.
-  The geometry is permanent; only the joint *counter* shifts. On connect the
-  robot **auto-detects** a likely reset (compares live joints to the last saved
-  pose) and warns; you then jog the outlet over one known well and run
-  `reanchor <well>` — the whole calibration is restored. **No re-teaching, ever.**
+- **Startup/shutdown check habit**: **A1 is the anchor well.** The CLI verifies
+  on A1 at startup (`check`) and parks on A1 at shutdown, so you always confirm
+  the frame. `check [well]` runs it anytime; `--no-check` skips.
+- **Power-cycle / bump recovery**: a crash, power loss, or a hard accidental
+  push does **not** require re-teaching. The geometry is permanent; only the
+  joint *counter* shifts (a constant offset). On connect the robot **auto-detects**
+  a likely reset (live joints vs last saved pose) and warns. To recover: jog the
+  outlet onto **A1** and run `reanchor` (defaults to A1). **No re-teaching, ever.**
+  Note: a bump that skips steps mid-session can't be auto-detected (no encoder) —
+  run `check` if you suspect one.
 
 ## Critical rules (see [RULES](.claude/RULES.md))
 

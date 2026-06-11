@@ -27,8 +27,9 @@ Commands:
     sethome                      zero the joints at the current pose (manual home)
     metric                       show the fitted 5-bar kinematics / maps + error
     fitkin [starts]              re-fit the 5-bar geometry from taught wells
-    reanchor <well>              after a power-cycle: jog to one known well,
-                                 then run this - recovers the frame, no re-teach
+    check [well]                 go to A1 (or <well>) to VERIFY position by eye
+    reanchor [well]              if the check is off (power-cycle/bump): jog onto
+                                 A1, run this - recovers the frame, no re-teach
     predict <well> [labware]     predicted joints for a well (optionally other labware)
     labware                      list available labware definitions
     save [path]                  persist the teach table to JSON
@@ -94,7 +95,9 @@ class PhilShell:
             elif cmd == "fitkin":
                 bot.fit_kinematics(n_starts=int(args[0]) if args else 400)
             elif cmd == "reanchor":
-                bot.reanchor(args[0])
+                bot.reanchor(args[0] if args else None)   # default A1
+            elif cmd == "check":
+                bot.check(args[0] if args else None)      # default A1
             elif cmd == "predict":
                 from .well_plate import WellPlate
                 pl = WellPlate.load(" ".join(args[1:])) if len(args) > 1 else None
@@ -148,6 +151,8 @@ def main(argv=None):
     ap.add_argument("--version", default="Teensy", help="controller version")
     ap.add_argument("-c", "--command", action="append", default=[],
                     help="run a command then continue (repeatable)")
+    ap.add_argument("--no-check", action="store_true",
+                    help="skip the startup/shutdown A1 verification")
     args = ap.parse_args(argv)
 
     bot = PhilRobot(labware_path=args.labware, teach_path=args.teach,
@@ -159,12 +164,30 @@ def main(argv=None):
         print(f"\n{e}\n")
         return 2
     shell = PhilShell(bot)
+    do_check = not (args.no_check or args.simulate)
     try:
+        # HABIT: verify on the anchor well (A1) at startup
+        if do_check:
+            if bot.frame_suspect:
+                print(f"\n[startup] frame looks reset — jog the outlet onto "
+                      f"{bot.ANCHOR_WELL} and run `reanchor {bot.ANCHOR_WELL}` "
+                      "before any goto.\n")
+            else:
+                print(f"\n[startup check] moving to {bot.ANCHOR_WELL} to verify...")
+                bot.check()
         for c in args.command:
             print(f"phil> {c}")
             shell.do(c)
         shell.repl()
     finally:
+        # HABIT: park on the anchor well (A1) when done, so next start is verified
+        try:
+            if do_check and bot.connected and not bot.frame_suspect:
+                print(f"[shutdown] parking on {bot.ANCHOR_WELL} (anchor) "
+                      "and saving position...")
+                bot.goto_well(bot.ANCHOR_WELL)
+        except Exception:
+            pass
         bot.close()
 
 

@@ -24,9 +24,15 @@
 
 ## Day-to-day
 - Run from `software/`. `python3 -m phil.cli`, then `goto <well>`.
-- After a **power-cycle**: on connect the robot warns if the frame looks reset.
-  Jog the outlet over one known well (e.g. A1) and run `reanchor A1`. Calibration
-  restored; **no re-teach**. (Geometry in `phil_kinematics.json` is permanent.)
+- **Check on start and finish.** A1 is the anchor well. The CLI moves to A1 at
+  startup so you can eyeball it, and parks on A1 at shutdown. If the outlet is
+  ever NOT on A1 during the check, the frame slipped — jog onto A1 and `reanchor`.
+  Run `check` anytime you suspect a bump. (`--no-check` skips the auto-moves.)
+- After a **power-cycle or accidental bump**: on connect the robot warns if the
+  frame looks reset. Jog the outlet onto A1 and run `reanchor` (defaults to A1).
+  Calibration restored; **no re-teach** (geometry in `phil_kinematics.json` is
+  permanent). A mid-session bump that skips steps isn't auto-detected (no
+  encoder) — that's what the start/finish `check` is for.
 - Switch plates: `--labware "<name>"` (list with `labware`); geometry maps the
   new JSON's wells.
 
