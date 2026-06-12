@@ -3,7 +3,8 @@
 Run it in YOUR terminal (it needs live keyboard input):
 
     cd software
-    python -m phil.jog_teach
+    python -m phil.jog_teach              # teach wells (arrow keys)
+    python -m phil.jog_teach --anchor     # anchor the 4 corners -> affine frame fix
 
 Each arrow drives ONE motor by a clean whole step (no rounding):
     Up / Down       X motor +/-   (outlet ~ toward front-right / back-left)
@@ -86,16 +87,24 @@ def _announce(target):
         sys.stdout.write(f"\n  >>> Go to {target}: {hint}\n")
 
 
-def _approach(bot, target):
-    """If the map is already fitted, drive near the predicted spot so the user
-    only has to nudge the last bit before recording."""
-    if not target or bot.teach_table.is_taught(target):
-        return
-    if not (bot.well_map and bot.well_map.is_fitted):
+def _approach(bot, target, anchor_mode=False):
+    """Drive near the predicted spot so the user only nudges the last bit.
+
+    Anchor mode uses the current corrected goto target (so even already-taught
+    corners are auto-approached); teach mode uses the raw map and skips taught wells.
+    """
+    if not target:
         return
     try:
-        p = bot.predict_well(target)
-        sys.stdout.write(f"  (auto-approaching predicted {target} -> "
+        if anchor_mode:
+            p = bot._resolve_well(target)[0]          # current corrected prediction
+        else:
+            if bot.teach_table.is_taught(target):
+                return
+            if not (bot.well_map and bot.well_map.is_fitted):
+                return
+            p = bot.predict_well(target)
+        sys.stdout.write(f"  (auto-approaching {target} -> "
                          f"X={p['X']} Y={p['Y']}; nudge then Enter)\n")
         bot._move_joints_to(x=p["X"], y=p["Y"])
     except Exception as e:
@@ -104,19 +113,32 @@ def _approach(bot, target):
 
 def main(argv=None):
     import sys as _sys
+    raw = list(argv if argv is not None else _sys.argv[1:])
+    anchor_mode = "--anchor" in raw
+    raw = [a for a in raw if a != "--anchor"]
+
     bot = PhilRobot(backend="legacy")
     bot.connect()
 
-    # Optional: pass specific wells to teach/refine, e.g.
-    #   python -m phil.jog_teach A6 H6 C1 C12
-    # If the map is already fitted, each is auto-approached so you only nudge.
-    guide = [w.upper() for w in (argv if argv is not None else _sys.argv[1:])] or list(GUIDE)
+    if anchor_mode:
+        # Capture the 4 corners as an affine frame correction (no teaching, no refit).
+        bot.clear_anchors()
+        guide = list(bot.ANCHOR_WELLS)
+    else:
+        # Optional: pass specific wells to teach/refine, e.g.
+        #   python -m phil.jog_teach A6 H6 C1 C12
+        guide = [w.upper() for w in raw] or list(GUIDE)
 
     print(__doc__)
-    print(f"Guide order: {' -> '.join(guide)}\n")
-    print("Tip: on the FIRST well, center it then press 'h' (home) before Enter."
-          " For refine runs (map already built) the arm auto-approaches each well"
-          " - just nudge and Enter.\n")
+    print(f"{'ANCHOR' if anchor_mode else 'TEACH'} order: {' -> '.join(guide)}\n")
+    if anchor_mode:
+        print("ANCHOR mode: center the outlet on each corner, press Enter to capture it"
+              " (no teaching). After all 4, press q to fit + save the correction.\n"
+              "Do NOT press 'h'. Arrows jog; +/- change step.\n")
+    else:
+        print("Tip: on the FIRST well, center it then press 'h' (home) before Enter."
+              " For refine runs (map already built) the arm auto-approaches each well"
+              " - just nudge and Enter.\n")
 
     step_idx = DEFAULT_STEP_IDX
     gi = 0
@@ -128,7 +150,7 @@ def main(argv=None):
         tty.setcbreak(fd)
         target = guide[gi] if gi < len(guide) else None
         _announce(target)
-        _approach(bot, target)
+        _approach(bot, target, anchor_mode)
         _status(bot, target, STEPS[step_idx], recorded)
         while True:
             step = STEPS[step_idx]
@@ -150,11 +172,24 @@ def main(argv=None):
             elif key in ("-", "_"):
                 step_idx = max(step_idx - 1, 0)
             elif key == "h":
-                bot.set_home()
-                sys.stdout.write("\n  [home set here -> 0,0,0]\n")
+                if anchor_mode:
+                    sys.stdout.write("\n  [h disabled in anchor mode — don't zero the frame]\n")
+                else:
+                    bot.set_home()
+                    sys.stdout.write("\n  [home set here -> 0,0,0]\n")
             elif key == "ENTER":
                 if target is None:
                     sys.stdout.write("\n  [no target — press n to pick the next, or q to quit]\n")
+                elif anchor_mode:
+                    bot.add_anchor(target)
+                    if target not in recorded:
+                        recorded.append(target)
+                    gi += 1
+                    target = guide[gi] if gi < len(guide) else None
+                    if target is None:
+                        sys.stdout.write("  [all 4 corners captured — press q to fit + save]\n")
+                    _announce(target)
+                    _approach(bot, target, anchor_mode)
                 else:
                     bot.teach_well(target)
                     recorded.append(target)
@@ -170,9 +205,16 @@ def main(argv=None):
                 gi += 1
                 target = guide[gi] if gi < len(guide) else None
                 _announce(target)
-                _approach(bot, target)
+                _approach(bot, target, anchor_mode)
             elif key == "u":
-                if recorded:
+                if anchor_mode:
+                    if recorded:
+                        w = recorded.pop()
+                        bot._anchor_pts.pop(w, None)
+                        gi = max(0, gi - 1)
+                        target = guide[gi] if gi < len(guide) else None
+                        sys.stdout.write(f"\n  [un-anchored {w}]\n")
+                elif recorded:
                     w = recorded.pop()
                     bot.teach_table.forget(w)
                     bot.calibration.reference_points = [
@@ -184,19 +226,31 @@ def main(argv=None):
                     target = guide[gi] if gi < len(guide) else None
                     sys.stdout.write(f"\n  [undid {w}]\n")
             elif key == "s":
-                p = bot.teach_table.save(bot.teach_path)
-                if bot.calibration.reference_points:
-                    bot.calibration.save(bot.calibration_path)
-                sys.stdout.write(f"\n  [saved -> {p}]\n")
+                if anchor_mode:
+                    if bot._anchor_pts:
+                        sys.stdout.write("\n")
+                        bot.fit_anchor()
+                else:
+                    p = bot.teach_table.save(bot.teach_path)
+                    if bot.calibration.reference_points:
+                        bot.calibration.save(bot.calibration_path)
+                    sys.stdout.write(f"\n  [saved -> {p}]\n")
             elif key == "q":
                 break
             _status(bot, target, STEPS[step_idx], recorded)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        bot.teach_table.save(bot.teach_path)
-        if bot.calibration.reference_points:
-            bot.calibration.save(bot.calibration_path)
-        print("\nsaved teach table + metric map. ", bot.teach_table.summary())
+        if anchor_mode:
+            if bot._anchor_pts:
+                print("\nfitting frame correction from corners...")
+                bot.fit_anchor()
+            else:
+                print("\nno corners captured — nothing to fit.")
+        else:
+            bot.teach_table.save(bot.teach_path)
+            if bot.calibration.reference_points:
+                bot.calibration.save(bot.calibration_path)
+            print("\nsaved teach table + metric map. ", bot.teach_table.summary())
         bot.close()
 
 
