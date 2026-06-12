@@ -514,6 +514,13 @@ class PhilRobot:
         return (self.frame_correction["cx"], self.frame_correction["cy"])
 
     def _resolve_raw(self, well_id: str):
+        # A taught well is measured ground truth -> exact replay ALWAYS wins.
+        # (The 5-bar model overfits the ~10 taught wells and mis-places untaught
+        #  ones by up to ~4 mm at the edges, so a recorded well must beat it.)
+        if self.teach_table.is_taught(well_id):
+            return self.teach_table.joint_for_well(well_id, self.plate), "taught"
+        # Not taught yet: fall back to the model so the arm still moves while you
+        # teach. Once every well is taught, nothing reaches these branches.
         if self.kin_model and self.kin_model.is_fitted:
             try:
                 return self.kin_model.predict(well_id, self.plate), "kinematics"
@@ -521,8 +528,6 @@ class PhilRobot:
                 pass
         if self.well_map and self.well_map.is_fitted:
             return self.well_map.predict(well_id), "curve-fit"
-        if self.teach_table.is_taught(well_id):
-            return self.teach_table.joint_for_well(well_id, self.plate), "taught"
         if self.calibration.is_fitted and len(self.calibration.reference_points) >= 3:
             return self.predict_well(well_id), "metric-affine"
         return self.teach_table.joint_for_well(well_id, self.plate), "interpolated"

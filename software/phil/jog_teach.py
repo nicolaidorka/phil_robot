@@ -4,6 +4,7 @@ Run it in YOUR terminal (it needs live keyboard input):
 
     cd software
     python -m phil.jog_teach              # teach wells (arrow keys)
+    python -m phil.jog_teach --all        # teach EVERY well (snake order, resumable)
     python -m phil.jog_teach --anchor     # anchor the 4 corners -> affine frame fix
 
 Each arrow drives ONE motor by a clean whole step (no rounding):
@@ -35,10 +36,36 @@ import time
 import tty
 
 from .robot import PhilRobot
+from .geometry.well_plate import WellPlate
 
 # Order I guide you through: 4 corners (best spread) + 2 middles to capture the
 # arm's curve. You can change this list or just keep going past it.
 GUIDE = ["A1", "A12", "H1", "H12", "D6", "E7"]
+
+
+def _serpentine(plate):
+    """All wells in a boustrophedon (snake) order: row A left->right, row B
+    right->left, ... so the arm never flies across the plate between wells."""
+    rc = {wid: WellPlate.parse_well_id(wid) for wid in plate.well_ids()}
+    rows = sorted({r for r, _ in rc.values()})
+    cols = sorted({c for _, c in rc.values()})
+    byrc = {(r, c): wid for wid, (r, c) in rc.items()}
+    order = []
+    for i, r in enumerate(rows):
+        seq = cols if i % 2 == 0 else list(reversed(cols))
+        order += [byrc[(r, c)] for c in seq if (r, c) in byrc]
+    return order
+
+
+def _hint(target):
+    h = HINTS.get(target)
+    if h:
+        return h
+    try:
+        r, c = WellPlate.parse_well_id(target)
+        return f"row {chr(ord('A') + r)} ({r + 1} down), column {c + 1}"
+    except Exception:
+        return ""
 
 # Plain-language hint for where each well is on the 8x12 grid (rows A..H,
 # columns 1..12). A and 1 are one corner; H and 12 are the diagonal opposite.
@@ -83,21 +110,21 @@ def _status(bot, target, step, recorded):
 
 def _announce(target):
     if target:
-        hint = HINTS.get(target, "")
-        sys.stdout.write(f"\n  >>> Go to {target}: {hint}\n")
+        sys.stdout.write(f"\n  >>> Go to {target}: {_hint(target)}\n")
 
 
-def _approach(bot, target, anchor_mode=False):
+def _approach(bot, target, anchor_mode=False, always=False):
     """Drive near the predicted spot so the user only nudges the last bit.
 
-    Anchor mode uses the current corrected goto target (so even already-taught
-    corners are auto-approached); teach mode uses the raw map and skips taught wells.
+    Anchor mode (or ``always``, used by teach-all) uses the current corrected
+    goto target, so even already-taught wells are auto-approached; plain teach
+    mode uses the raw map and skips taught wells.
     """
     if not target:
         return
     try:
-        if anchor_mode:
-            p = bot._resolve_well(target)[0]          # current corrected prediction
+        if anchor_mode or always:
+            p = bot._resolve_well(target)[0]          # current best estimate
         else:
             if bot.teach_table.is_taught(target):
                 return
@@ -115,7 +142,8 @@ def main(argv=None):
     import sys as _sys
     raw = list(argv if argv is not None else _sys.argv[1:])
     anchor_mode = "--anchor" in raw
-    raw = [a for a in raw if a != "--anchor"]
+    all_mode = "--all" in raw
+    raw = [a for a in raw if a not in ("--anchor", "--all")]
 
     bot = PhilRobot(backend="legacy")
     bot.connect()
@@ -124,17 +152,34 @@ def main(argv=None):
         # Capture the 4 corners as an affine frame correction (no teaching, no refit).
         bot.clear_anchors()
         guide = list(bot.ANCHOR_WELLS)
+    elif all_mode:
+        # Teach EVERY well on the plate, in a snake order to minimise travel.
+        guide = _serpentine(bot.plate)
     else:
         # Optional: pass specific wells to teach/refine, e.g.
         #   python -m phil.jog_teach A6 H6 C1 C12
         guide = [w.upper() for w in raw] or list(GUIDE)
 
     print(__doc__)
-    print(f"{'ANCHOR' if anchor_mode else 'TEACH'} order: {' -> '.join(guide)}\n")
+    label = "ANCHOR" if anchor_mode else ("TEACH-ALL" if all_mode else "TEACH")
+    if all_mode:
+        already = sum(1 for w in guide if bot.teach_table.is_taught(w))
+        print(f"{label}: {len(guide)} wells, {already} already taught. "
+              f"order: {guide[0]} .. {guide[-1]} (snake)\n")
+    else:
+        print(f"{label} order: {' -> '.join(guide)}\n")
     if anchor_mode:
         print("ANCHOR mode: center the outlet on each corner, press Enter to capture it"
               " (no teaching). After all 4, press q to fit + save the correction.\n"
               "Do NOT press 'h'. Arrows jog; +/- change step.\n")
+    elif all_mode:
+        print("TEACH-ALL: the arm auto-approaches each well (taught spot if known,"
+              " else the model). Nudge to center, Enter to record, n to skip.\n"
+              "  - Do NOT press 'h' (it would zero the frame and wreck the wells"
+              " you've already taught). The existing calibration stays put.\n"
+              "  - 's' saves progress; you can 'q' to quit and rerun --all later to"
+              " resume (already-taught wells are re-approached so you can confirm"
+              " or 'n' past them).\n")
     else:
         print("Tip: on the FIRST well, center it then press 'h' (home) before Enter."
               " For refine runs (map already built) the arm auto-approaches each well"
@@ -150,7 +195,7 @@ def main(argv=None):
         tty.setcbreak(fd)
         target = guide[gi] if gi < len(guide) else None
         _announce(target)
-        _approach(bot, target, anchor_mode)
+        _approach(bot, target, anchor_mode, always=all_mode)
         _status(bot, target, STEPS[step_idx], recorded)
         while True:
             step = STEPS[step_idx]
@@ -200,12 +245,12 @@ def main(argv=None):
                         sys.stdout.write("  [all wells done — q to save & quit,"
                                          " or keep teaching with n]\n")
                     _announce(target)
-                    _approach(bot, target)
+                    _approach(bot, target, always=all_mode)
             elif key == "n":
                 gi += 1
                 target = guide[gi] if gi < len(guide) else None
                 _announce(target)
-                _approach(bot, target, anchor_mode)
+                _approach(bot, target, anchor_mode, always=all_mode)
             elif key == "u":
                 if anchor_mode:
                     if recorded:
