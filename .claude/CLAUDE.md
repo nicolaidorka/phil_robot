@@ -40,9 +40,14 @@ The controller is a Teensy on `/dev/ttyACM1` (auto-detected by manufacturer
 
 ## What works
 
-- **`goto <any well>`** — joints computed from the fitted **5-bar kinematics**
-  (`phil/geometry/kinematics.py`), no per-well teaching. Verified on hardware (A1, E6,
-  B10, G9). `goto` priority: kinematics → RBF map → exact taught → affine.
+- **`goto <well>`** — replays the **exact taught joints** for that well.
+  **Taught wins, always.** The 5-bar kinematic model overfit the ~10 taught
+  wells (leave-one-out ≈ 1.5 mm avg, 4.3 mm worst at the edges), so we teach
+  every well instead. `goto` priority: **exact taught → kinematics → RBF map →
+  affine** — the model/map only fill in not-yet-taught wells so the arm still
+  moves while you finish teaching. **72/96 wells are taught** (rows A–E + H;
+  rows F and G remain). Teach the rest with `python3 -m phil.jog_teach --all`
+  (snake order, resumable — `s` saves, `q` quits, rerun to continue).
 - **Any labware from its JSON** — `--labware "<name>"`; wells come from the
   plate's JSON mm through the same geometry. Assumes the plate sits in the same
   physical spot. Default plate: Eppendorf twin.tec LoBind 96 PCR.
@@ -89,9 +94,9 @@ software/phil/
   selftest.py           hardware self-test
   geometry/             mm <-> joint models
     well_plate.py         loads labware JSON (by name from labware/)
-    teach.py              teach table (per-well joint positions)
+    teach.py              teach table (per-well joint positions)  <- primary
     calibration.py        affine fallback
-    kinematics.py         5-bar geometry fit + inverse kinematics  <- the solution
+    kinematics.py         5-bar geometry fit + inverse kinematics  (fallback for untaught wells)
     well_map.py           RBF curve-fit fallback (needs scipy)
   hardware/
     legacy_mc.py          driver for this Teensy's 6-byte/20-byte firmware
@@ -100,9 +105,19 @@ software/phil/
                     phil_frame.json (reanchor offset + power-cycle detection)
 ```
 
-## Re-calibrating from scratch (only if geometry changes)
+## Teaching / re-calibrating
 
-1. `python3 -m phil.jog_teach` — teach ~10 spread wells (4 corners + 4 edge
-   midpoints + 2 middle). On the first well, center it and press `h` (home).
-2. `fitkin` in the CLI (or it's auto-saved) — fits the 5-bar to ~0.2 mm RMS.
-3. Done — `goto` any well, any plate.
+The arm is open-loop with backlash, so the dependable approach is to **teach
+every well** and replay the exact joints. Current state: 72/96 taught.
+
+1. `python3 -m phil.jog_teach --all` — walks all 96 wells in snake order,
+   auto-approaching each from the last. Center the **first** well and press `h`
+   (home) before Enter; then nudge + Enter per well, final approach in one
+   direction (backlash). `s` saves progress, `q` quits — rerun to resume.
+2. That's it — `goto <well>` replays the taught joints. (The 5-bar model is only
+   a fallback for any well you haven't taught yet, and overfits — don't rely on
+   it for accuracy.)
+
+If the **arm geometry physically changes**, the kinematic model is stale: teach
+a spread of wells and run `fitkin` to refit it (~0.2 mm RMS over the fit set,
+but it does not generalize well to the edges — see [FINDINGS](FINDINGS.md)).

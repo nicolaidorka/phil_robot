@@ -38,13 +38,21 @@
 - Switch plates: `--labware "<name>"` (list with `labware`); geometry maps the
   new JSON's wells.
 
-## Re-calibration (rare — only if the arm geometry physically changes)
-1. `python3 -m phil.jog_teach` — teach ~10 spread wells (4 corners, 4 edge
-   midpoints, 2 middle). Center the FIRST well and press `h` (home) before Enter.
-   The console auto-approaches later wells; just nudge + Enter. Final approach in
-   one direction (backlash); "over the well" is good enough.
-2. `fitkin` (or it's saved) → fits the 5-bar (aim for RMS < ~0.5 mm).
-3. Test `goto` on a few untaught wells in different regions.
+## Teaching (the production path — taught wells beat every model)
+- The 5-bar model overfits (edge LOO ~1.5–4 mm), so we **teach every well** and
+  replay exact joints. `goto` is taught-first; the model only fills untaught
+  wells. **72/96 taught** (rows A–E + H; rows F and G remain).
+- Teach the rest: `python3 -m phil.jog_teach --all` — all 96 in snake order,
+  auto-approaching each from the last. Center the FIRST well and press `h`
+  (home) before Enter; then nudge + Enter per well, final approach in ONE
+  direction (backlash), "over the well" is good enough. `s` saves, `q` quits —
+  rerun to resume.
+
+## Re-fitting the 5-bar (rare — only if the arm geometry physically changes)
+1. Teach a spread of wells (4 corners, 4 edge midpoints, 2 middle) as above.
+2. `fitkin` (or it's saved) → refits the 5-bar (in-sample RMS < ~0.5 mm; do not
+   expect edge accuracy — it overfits, which is why we teach every well).
+3. Re-teach the affected wells so `goto` replays measured joints, not the model.
 
 ## Development
 - Keep `legacy_mc.py` matching the firmware framing (6/20, CRC-8/CCITT, 256

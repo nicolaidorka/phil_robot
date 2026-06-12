@@ -496,7 +496,7 @@ class PhilRobot:
         return self._resolve_well(well_id)[0]
 
     def _resolve_well(self, well_id: str):
-        """Joint target: 5-bar kinematics > RBF curve-fit > affine > corner interp.
+        """Joint target: exact taught > 5-bar kinematics > RBF curve-fit > affine.
 
         The persisted joint-frame correction (from reanchor/anchor) is applied so
         the permanent geometry calibration survives a controller power-cycle.

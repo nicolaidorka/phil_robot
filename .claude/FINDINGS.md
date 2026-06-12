@@ -67,11 +67,20 @@ non-obvious things that cost the most time; read before debugging.
    fit an affine with 0 residual = false confidence; the 4th reveals the error.
 2. **RBF curve-fit** (`well_map.py`): ~2–3 mm typical, but **sags in sparse
    regions** (e.g. B10 landed half a well off). Good fallback, not the answer.
-3. **5-bar kinematic model** (`kinematics.py`): **the solution.** Fit from ~10
-   spread wells → RMS ≈ 0.2 mm; computes every well/every plate from geometry,
-   uniform accuracy. Verified: untaught B10 and G9 land on target.
+3. **5-bar kinematic model** (`kinematics.py`): looked like the solution — fit
+   from ~10 spread wells gives in-sample RMS ≈ 0.2 mm. **But it overfits.**
+   Leave-one-out over the taught wells is ≈ **1.5 mm avg, 4.3 mm worst at the
+   edges**: 12 params absorb per-well mechanical error (backlash, flex) rather
+   than true geometry, so untaught edge wells land off. Kept only as the
+   fallback for wells not yet taught.
+4. **Teach every well** — the actual answer for this open-loop arm. Replay the
+   exact taught joints; `_resolve_well` returns taught-first. `jog_teach --all`
+   walks all 96 in snake order (resumable). **72/96 taught** so far (rows A–E +
+   H; rows F and G remain). No model beats measured ground truth here.
 
 ## Precision ceiling
-- ~1–2 mm, set by open-loop steppers + backlash. The kinematic model itself is
-  sub-millimeter; the remaining error is mechanical. Adding encoders or
-  backlash-compensated approaches would be the next lever.
+- ~1–2 mm, set by open-loop steppers + backlash. Even with exact taught joints,
+  backlash on the approach is the floor. Models (5-bar, RBF) are *above* this
+  floor for untaught wells; teaching the well removes the model error but not
+  the mechanical floor. Encoders or backlash-compensated approaches would be the
+  next lever.

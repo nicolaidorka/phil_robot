@@ -35,16 +35,21 @@ motor angles, and vice-versa.
 
 Order of preference for a well's joint target:
 
-1. **`KinematicModel`** (`kinematics.py`) — inverse kinematics of the fitted
-   5-bar. Best: uniform accuracy everywhere, generalizes to any labware.
-2. **`WellMap`** (`well_map.py`) — scipy RBF interpolation of taught wells.
-   Fallback; sags in sparse regions.
-3. **Exact taught** (`teach.py` `TeachTable`) — the recorded joints for a well.
+1. **Exact taught** (`teach.py` `TeachTable`) — the recorded joints for a well.
+   **This always wins when present.** Measured ground truth beats any model;
+   the 5-bar overfits the taught set (see below), so a taught well is replayed
+   verbatim. The strategy is to teach every well (`jog_teach --all`); the
+   branches below only fill in wells not taught yet.
+2. **`KinematicModel`** (`kinematics.py`) — inverse kinematics of the fitted
+   5-bar. Generalizes to any labware but mis-places untaught wells at the edges
+   (leave-one-out ≈ 1.5 mm avg, 4.3 mm worst).
+3. **`WellMap`** (`well_map.py`) — scipy RBF interpolation of taught wells.
+   Sags in sparse regions.
 4. **`Calibration`** (`calibration.py`) — affine (plate mm → joints). Coarse;
    only adequate for a true Cartesian stage, kept for completeness.
 
 A persisted **joint-frame offset** (`phil_frame.json`, set by `reanchor`) is
-added to the result so the permanent geometry survives a power-cycle.
+added to the result so the calibration survives a power-cycle.
 
 ## Kinematic model (`kinematics.py`)
 
@@ -63,6 +68,11 @@ Parameters (12), all lengths in plate-local mm, angles in radians:
   (elbow = circle(base, l) ∩ circle(E, dist)), then `joint = (θ - o)/s`, with
   angle-wrap unwrapping into the plausible joint range.
 - Saved to `config/phil_kinematics.json`. Loaded on `PhilRobot.__init__`.
+- **Caveat — overfits.** The in-sample RMS is sub-mm, but leave-one-out over the
+  taught wells is ≈ 1.5 mm avg / 4.3 mm worst at the edges: 12 params soak up
+  per-well mechanical error (backlash, flex) instead of true geometry. So the
+  model is a **fallback for untaught wells only**; taught wells are replayed
+  exactly (`_resolve_well` step 1). The production strategy is teach-every-well.
 
 ## Driver (`legacy_mc.py`)
 
