@@ -38,21 +38,29 @@
 - Switch plates: `--labware "<name>"` (list with `labware`); geometry maps the
   new JSON's wells.
 
-## Teaching (the production path — taught wells beat every model)
-- The 5-bar model overfits (edge LOO ~1.5–4 mm), so we **teach every well** and
-  replay exact joints. `goto` is taught-first; the model only fills untaught
-  wells. **72/96 taught** (rows A–E + H; rows F and G remain).
-- Teach the rest: `python3 -m phil.jog_teach --all` — all 96 in snake order,
-  auto-approaching each from the last. Center the FIRST well and press `h`
-  (home) before Enter; then nudge + Enter per well, final approach in ONE
-  direction (backlash), "over the well" is good enough. `s` saves, `q` quits —
-  rerun to resume.
+## Teaching (the production path — boundary taught, interior interpolated)
+- The 5-bar overfits when it has to *extrapolate* to edges (LOO ~1.5–4 mm). Fix:
+  **teach the boundary (rows A–E + H, 72/96) and refit**, so the model only
+  *interpolates* the untaught interior rows **F and G** (bracketed by taught E
+  and H). `goto` is taught-first; F/G come from the refit model (F6 verified
+  ~0.5 mm, **column 1 still weak**). This is already in place.
+- To teach more wells (e.g. push F/G or column-1 below model error):
+  `python3 -m phil.jog_teach --all` — snake order, auto-approaching each from the
+  last. Nudge to center, Enter to record, `n` to skip, final approach in ONE
+  direction (backlash), "over the well" is good enough. **Do NOT press `h`** in
+  `--all` — it zeros the frame and wrecks the wells already taught. `s` saves,
+  `q` quits — rerun `--all` to resume. Run `fitkin` afterward to fold new wells
+  into the interior interpolation.
 
 ## Re-fitting the 5-bar (rare — only if the arm geometry physically changes)
-1. Teach a spread of wells (4 corners, 4 edge midpoints, 2 middle) as above.
+1. Do a *fresh* teach of a spread of wells (4 corners, 4 edge midpoints, 2
+   middle). On the FIRST well only, center it and press `h` (home) to zero the
+   frame — this is the ONLY time homing is correct (it invalidates existing
+   taught wells, which a geometry change makes stale anyway).
 2. `fitkin` (or it's saved) → refits the 5-bar (in-sample RMS < ~0.5 mm; do not
-   expect edge accuracy — it overfits, which is why we teach every well).
-3. Re-teach the affected wells so `goto` replays measured joints, not the model.
+   expect edge accuracy — it overfits, which is why we teach the dense boundary).
+3. Re-teach the boundary rows (`--all`, `n` past the interior) so `goto` replays
+   measured joints on the perimeter and the refit model interpolates F/G.
 
 ## Development
 - Keep `legacy_mc.py` matching the firmware framing (6/20, CRC-8/CCITT, 256

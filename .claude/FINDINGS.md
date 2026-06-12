@@ -67,20 +67,77 @@ non-obvious things that cost the most time; read before debugging.
    fit an affine with 0 residual = false confidence; the 4th reveals the error.
 2. **RBF curve-fit** (`well_map.py`): ~2–3 mm typical, but **sags in sparse
    regions** (e.g. B10 landed half a well off). Good fallback, not the answer.
-3. **5-bar kinematic model** (`kinematics.py`): looked like the solution — fit
-   from ~10 spread wells gives in-sample RMS ≈ 0.2 mm. **But it overfits.**
-   Leave-one-out over the taught wells is ≈ **1.5 mm avg, 4.3 mm worst at the
-   edges**: 12 params absorb per-well mechanical error (backlash, flex) rather
-   than true geometry, so untaught edge wells land off. Kept only as the
-   fallback for wells not yet taught.
-4. **Teach every well** — the actual answer for this open-loop arm. Replay the
-   exact taught joints; `_resolve_well` returns taught-first. `jog_teach --all`
-   walks all 96 in snake order (resumable). **72/96 taught** so far (rows A–E +
-   H; rows F and G remain). No model beats measured ground truth here.
+3. **5-bar kinematic model, fit from ~10 spread wells**: looked like the
+   solution — in-sample RMS ≈ 0.2 mm. **But it overfits.** Leave-one-out over
+   those wells is ≈ **1.5 mm avg, 4.3 mm worst at the edges**: 12 params absorb
+   per-well mechanical error (backlash, flex) rather than true geometry, and
+   with only ~10 points the model must *extrapolate* to the edges, where it's
+   worst.
+4. **Teach the boundary, refit, interpolate the interior** — the production
+   strategy, and what fixes (3). Teach **rows A–E and H** (72/96; all 12 columns
+   of each). Those rows *bracket* the only untaught wells — interior **rows F and
+   G** — so the refit model **interpolates** F/G between taught neighbors instead
+   of extrapolating to an edge. Refit the 5-bar on all 72 (`fitkin`, ~300 starts
+   → **RMS ≈ 0.42 mm** in-sample). `_resolve_well` is **taught-first**: the 72
+   boundary wells replay their exact recorded joints; F/G come from the refit
+   model. **Verified: F6 lands ~0.5 mm via the model.** Caveat: **column-1
+   (the far edge) is still weak** — even bracketed, the edge column is the
+   shakiest; teach those wells (or accept ~1 mm) if it matters.
 
 ## Precision ceiling
-- ~1–2 mm, set by open-loop steppers + backlash. Even with exact taught joints,
-  backlash on the approach is the floor. Models (5-bar, RBF) are *above* this
-  floor for untaught wells; teaching the well removes the model error but not
-  the mechanical floor. Encoders or backlash-compensated approaches would be the
-  next lever.
+- ~1–2 mm, set by open-loop steppers + backlash. A taught well replays its exact
+  joints but still lands within backlash of where it was taught — that's the
+  floor. The refit model adds ~0.5 mm of interpolation error on top for the
+  interior F/G wells. Confirmed on hardware: a full-plate goto sweep lands the
+  end piece ~1–1.5 mm off **even on taught wells** (the two arms don't converge
+  exactly over the well). Decomposition: ~0.5 mm full-step command quantization
+  (`legacy_mc._send_pos` sends whole full-steps) + ~1 mm backlash (dominant).
+
+### Anti-backlash approach — TRIED, made it WORSE, reverted (2026-06-11)
+- **What we tried:** a uniform fixed-direction final approach in `goto_well` —
+  pre-position 16 usteps (2 full-steps) short of the XY target and come in from
+  a fixed **+X/+Y** direction, so backlash is always taken up the same way.
+  (`_approach_joints` helper + `BACKLASH_TAKEUP_USTEPS` const.)
+- **Result:** slightly **worse**, not better, by eye. Reverted (not committed).
+- **Why it failed:** wells were **taught in snake order** (row A L→R, row B R→L,
+  …), and a plain `goto` sweep is *also* snake order — so the original
+  straight-in-from-previous-well move already arrives at most wells from
+  **roughly the direction they were taught**, and backlash mostly cancels by
+  luck of matching order. Forcing a *uniform* +X/+Y direction matched the L→R
+  rows but **opposed** the R→L rows, making those ~1 full-step worse. A single
+  global approach direction is wrong for snake-taught data.
+- **What it proved:** backlash **direction is a real, controllable lever** — the
+  uniform approach visibly changed where the arm landed. So the idea isn't dead,
+  just mis-applied.
+
+### Ideas not yet tried (next levers, in rough order of promise)
+0. **Mimic the teach motion (lead candidate).** Teaching nudges with **relative**
+   jogs (`MOVE_X`, small steps `[8,16,32,64,120]` usteps) and the recorded count
+   is "where the joint sits after small nudges in your final direction." But
+   `goto` replays with a single **absolute** `MOVETO_X` from wherever the arm was
+   — same count, *different backlash/step state*. Suspect this is the core
+   replay error. Fix to try: make `goto`'s **final approach do a few small
+   relative jog-steps in a fixed direction** (imitate the arrow keys) instead of
+   one absolute slam, so the joints settle in the same state as when taught.
+   Distinct from the failed uniform anti-backlash: that guessed a global
+   direction with one absolute move; this reproduces the *motion*, not just the
+   endpoint. (User noticed the teach arrow keys move in small steps — that's the
+   tell.)
+1. **Direction-matched approach:** approach each well from the **same direction
+   it was taught** — snake-aware (+X on L→R rows, −X on R→L rows), or better,
+   **record the actual final approach direction per well at teach time** and
+   replay it. This *cancels* backlash instead of fighting it.
+2. **Characterize the motion empirically ("learn how we move them"):** measure
+   commanded-vs-physical offset per joint per direction (by eye/camera over a
+   grid), build a small per-direction backlash-correction lookup, and apply it
+   in `goto`. Turns the hand-wavy ~1 mm into a measured, compensable model.
+3. **Smoother motion / settle:** slower final-leg velocity or a short settle
+   dwell before reading/using position, to cut end-of-move overshoot (we saw a
+   consistent +1 full-step end-of-move counter step).
+4. **Hardware:** the only sub-mm fixes are the **firmware reflash** (parked —
+   commands in microsteps, kills the quantization term) and/or **encoders**
+   (closes the loop, kills backlash). Both are bigger projects.
+- NOTE for evaluating any future fix: the firmware **readback is not
+  trustworthy** at ustep resolution (quantized to 8 usteps, direction-biased,
+  sampled before settle). Judge by **eye/camera on the well**, never by the
+  reported joints.

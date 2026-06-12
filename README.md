@@ -2,9 +2,10 @@
 
 Phil is an **articulated 5-bar arm robot** that holds one outlet/nozzle over a
 96-well plate. It drives wells of any labware from its JSON definition. Because
-the open-loop arm has backlash, the dependable path is to **teach each well and
-replay its exact joints**; a fitted 5-bar inverse-kinematic model fills in any
-well not yet taught (it overfits at the edges, so a taught well always wins).
+the open-loop arm has backlash, calibration is **teach the boundary, refit,
+interpolate the interior**: teach the perimeter rows and replay their exact
+joints, refit a 5-bar inverse-kinematic model on them, and let the model
+interpolate the few interior wells in between (a taught well always wins).
 
 > Phil is **not** a microscope. It reuses the Squid/octopi codebase only for the
 > Teensy motor firmware; the control software here is the self-contained `phil`
@@ -17,12 +18,13 @@ well not yet taught (it overfits at the edges, so a taught well always wins).
 - **X and Y are rotary arm joints** (two base motors, each driving a link; the
   two links meet at the outlet). **Z** is vertical. Open-loop steppers, no
   encoders, ~1–2 mm precision floor.
-- **Teach each well, replay exact joints.** `goto` returns the taught joints for
-  a well when it has them (72/96 taught so far; teach the rest with
-  `phil-teach --all`). A 5-bar model fit from taught wells (~0.2 mm in-sample
-  RMS) and an RBF map are fallbacks for untaught wells — the model generalizes
-  to any labware but overfits at the edges, so resolution is **exact taught →
-  kinematics → RBF map → affine**.
+- **Boundary taught, interior interpolated.** `goto` replays the exact taught
+  joints for a well when it has them — the 72 boundary wells (rows A–E + H) — and
+  uses a 5-bar model (refit on those 72, RMS ≈ 0.42 mm) for the interior rows F/G
+  that the boundary brackets (F6 verified ~0.5 mm). The model overfit/extrapolated
+  badly from a sparse fit, so the boundary is taught to keep it interpolating.
+  Resolution order: **exact taught → kinematics → RBF map → affine**. Teach more
+  wells anytime with `phil-teach --all`.
 - Any Opentrons-style labware JSON works — well mm-coordinates flow through the
   same geometry.
 

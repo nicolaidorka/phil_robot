@@ -36,13 +36,16 @@ motor angles, and vice-versa.
 Order of preference for a well's joint target:
 
 1. **Exact taught** (`teach.py` `TeachTable`) — the recorded joints for a well.
-   **This always wins when present.** Measured ground truth beats any model;
-   the 5-bar overfits the taught set (see below), so a taught well is replayed
-   verbatim. The strategy is to teach every well (`jog_teach --all`); the
-   branches below only fill in wells not taught yet.
-2. **`KinematicModel`** (`kinematics.py`) — inverse kinematics of the fitted
-   5-bar. Generalizes to any labware but mis-places untaught wells at the edges
-   (leave-one-out ≈ 1.5 mm avg, 4.3 mm worst).
+   **This always wins when present.** Measured ground truth beats any model.
+   The production strategy: teach the **boundary** (rows A–E and H, 72/96), which
+   brackets the only untaught wells — interior rows **F and G** — so step 2 only
+   ever *interpolates* them. `jog_teach --all` teaches more wells if wanted.
+2. **`KinematicModel`** (`kinematics.py`) — inverse kinematics of the 5-bar,
+   refit on all 72 taught wells. Used for the interior F/G wells: bracketed by
+   taught rows, it interpolates them (F6 verified ~0.5 mm). It *extrapolates*
+   poorly (the original ~10-well fit had edge LOO ≈ 1.5–4.3 mm) — column 1 is
+   still weak — which is exactly why the boundary is taught. Also the path for
+   any other labware (no taught wells yet).
 3. **`WellMap`** (`well_map.py`) — scipy RBF interpolation of taught wells.
    Sags in sparse regions.
 4. **`Calibration`** (`calibration.py`) — affine (plate mm → joints). Coarse;
@@ -62,8 +65,12 @@ Parameters (12), all lengths in plate-local mm, angles in radians:
 
 - **Fit**: `scipy.least_squares` multistart (random restarts, two FK branches),
   `soft_l1` loss then a `linear` polish. Fed the taught `(plate-mm ↔ joint)`
-  pairs. From 10 wells → **RMS ≈ 0.21 mm**; the two arms come out near-identical
-  (proximal ~64 mm, distal ~145 mm, pivots ~41 mm apart) — a real mechanism.
+  pairs. The two arms come out near-identical (proximal ~64 mm, distal ~145 mm,
+  pivots ~41 mm apart) — a real mechanism. **Current fit: all 72 taught
+  (boundary) wells, ~300 starts → RMS ≈ 0.42 mm in-sample.** (An early ~10-well
+  fit hit RMS ≈ 0.2 mm but overfit — edge LOO ≈ 1.5–4.3 mm. Fitting the dense
+  boundary trades a little in-sample RMS for far better interior interpolation:
+  F6 verified ~0.5 mm.)
 - **Inverse** (`predict`): well mm → joints via two circle intersections
   (elbow = circle(base, l) ∩ circle(E, dist)), then `joint = (θ - o)/s`, with
   angle-wrap unwrapping into the plausible joint range.

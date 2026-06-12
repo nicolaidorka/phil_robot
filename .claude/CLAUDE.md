@@ -40,14 +40,15 @@ The controller is a Teensy on `/dev/ttyACM1` (auto-detected by manufacturer
 
 ## What works
 
-- **`goto <well>`** — replays the **exact taught joints** for that well.
-  **Taught wins, always.** The 5-bar kinematic model overfit the ~10 taught
-  wells (leave-one-out ≈ 1.5 mm avg, 4.3 mm worst at the edges), so we teach
-  every well instead. `goto` priority: **exact taught → kinematics → RBF map →
-  affine** — the model/map only fill in not-yet-taught wells so the arm still
-  moves while you finish teaching. **72/96 wells are taught** (rows A–E + H;
-  rows F and G remain). Teach the rest with `python3 -m phil.jog_teach --all`
-  (snake order, resumable — `s` saves, `q` quits, rerun to continue).
+- **`goto <well>`** — for a taught well, replays its **exact recorded joints**
+  (**taught wins, always**); for an untaught well, the refit 5-bar model. `goto`
+  priority: **exact taught → kinematics → RBF map → affine**. Strategy: the
+  **72 boundary wells (rows A–E + H) are taught**, which *bracket* the only
+  untaught wells — interior **rows F and G** — so the model only **interpolates**
+  them (verified: F6 ~0.5 mm). The early ~10-well fit overfit and extrapolated
+  badly at the edges (LOO 1.5–4.3 mm); teaching the boundary fixes that.
+  **Column 1 is still the weak edge.** Teach more wells anytime with
+  `python3 -m phil.jog_teach --all` (snake order, resumable — `s` saves, `q` quits).
 - **Any labware from its JSON** — `--labware "<name>"`; wells come from the
   plate's JSON mm through the same geometry. Assumes the plate sits in the same
   physical spot. Default plate: Eppendorf twin.tec LoBind 96 PCR.
@@ -107,17 +108,24 @@ software/phil/
 
 ## Teaching / re-calibrating
 
-The arm is open-loop with backlash, so the dependable approach is to **teach
-every well** and replay the exact joints. Current state: 72/96 taught.
+The arm is open-loop with backlash, so the dependable approach is **teach the
+boundary, refit, interpolate the interior**. Current state: 72/96 taught (rows
+A–E + H), refit RMS ≈ 0.42 mm, interior rows F/G interpolated by the model
+(F6 verified ~0.5 mm). This is already done — you only re-do it if accuracy
+degrades or you want to push F/G/column-1 below the model error.
 
-1. `python3 -m phil.jog_teach --all` — walks all 96 wells in snake order,
-   auto-approaching each from the last. Center the **first** well and press `h`
-   (home) before Enter; then nudge + Enter per well, final approach in one
-   direction (backlash). `s` saves progress, `q` quits — rerun to resume.
-2. That's it — `goto <well>` replays the taught joints. (The 5-bar model is only
-   a fallback for any well you haven't taught yet, and overfits — don't rely on
-   it for accuracy.)
+1. `python3 -m phil.jog_teach --all` — walks the wells in snake order,
+   auto-approaching each from the last (taught spot if known, else the model).
+   Nudge to center, `Enter` to record, `n` to skip (e.g. past F/G if you're
+   leaving them to the model), final approach in one direction (backlash).
+   **Do NOT press `h`** — it zeros the frame and wrecks the wells already taught.
+   `s` saves progress, `q` quits — rerun `--all` to resume (already-taught wells
+   are re-approached so you can confirm or `n` past).
+2. After teaching new wells, run `fitkin` to refit the 5-bar (so the interior
+   interpolation reflects them). `goto` then replays taught joints exactly and
+   uses the refit model for whatever stays untaught.
 
-If the **arm geometry physically changes**, the kinematic model is stale: teach
-a spread of wells and run `fitkin` to refit it (~0.2 mm RMS over the fit set,
-but it does not generalize well to the edges — see [FINDINGS](FINDINGS.md)).
+If the **arm geometry physically changes**, the kinematic model is stale: do a
+*fresh* teach of a spread of wells — on the FIRST well only, center it and press
+`h` (home) to zero the frame — then `fitkin` to refit (~0.2 mm RMS over the fit
+set, but it does not generalize to the edges — see [FINDINGS](FINDINGS.md)).
