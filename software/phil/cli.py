@@ -29,7 +29,9 @@ Commands:
     fitkin [starts]              re-fit the 5-bar geometry from taught wells
     check [well]                 go to A1 (or <well>) to VERIFY position by eye
     reanchor [well]              if the check is off (power-cycle/bump): jog onto
-                                 A1, run this - recovers the frame, no re-teach
+                                 A1, run this - recovers the frame (translation), no re-teach
+    anchor <well>|fit|clear      sharper edge fix: jog/center each of the 4 corners
+                                 (A1 A12 H1 H12), `anchor <corner>` each, then `anchor fit`
     predict <well> [labware]     predicted joints for a well (optionally other labware)
     labware                      list available labware definitions
     save [path]                  persist the teach table to JSON
@@ -96,6 +98,19 @@ class PhilShell:
                 bot.fit_kinematics(n_starts=int(args[0]) if args else 400)
             elif cmd == "reanchor":
                 bot.reanchor(args[0] if args else None)   # default A1
+            elif cmd == "anchor":
+                # anchor <well> : capture a corner (jog to center it first)
+                # anchor fit / list / clear
+                sub = args[0].lower() if args else ""
+                if sub == "fit":
+                    bot.fit_anchor()
+                elif sub == "clear":
+                    bot.clear_anchors()
+                elif sub in ("list", ""):
+                    print("  collected:", ", ".join(sorted(bot._anchor_pts)) or "(none)",
+                          "| corners:", ", ".join(bot.ANCHOR_WELLS), "| then: anchor fit")
+                else:
+                    bot.add_anchor(args[0])
             elif cmd == "check":
                 bot.check(args[0] if args else None)      # default A1
             elif cmd == "predict":

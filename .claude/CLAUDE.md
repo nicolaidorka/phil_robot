@@ -58,6 +58,12 @@ The controller is a Teensy on `/dev/ttyACM1` (auto-detected by manufacturer
   outlet onto **A1** and run `reanchor` (defaults to A1). **No re-teaching, ever.**
   Note: a bump that skips steps mid-session can't be auto-detected (no encoder) —
   run `check` if you suspect one.
+- **Sharper edge accuracy (`anchor`)**: `reanchor` corrects a pure translation. For a
+  better fix when far-edge wells sit ~1 mm off, center each of the **4 corners**
+  (A1, A12, H1, H12) and `anchor <corner>` each, then `anchor fit` — it fits a small
+  **affine** joint-frame correction (offset + scale + rotation) over the 5-bar model.
+  Convex + clamped + identity-until-fit, so it can't harm the calibration; the model
+  and teach table are never touched. Won't beat the ~1 mm backlash floor.
 
 ## Critical rules (see [RULES](.claude/RULES.md))
 

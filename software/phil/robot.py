@@ -48,6 +48,27 @@ except Exception:                          # pragma: no cover
     KinematicModel = None
 
 
+# --- joint-frame correction (affine over the raw model prediction) ---------
+# Xcmd = a*Xm + b*Ym + cx ;  Ycmd = d*Xm + e*Ym + cy .  Recovers a counter
+# shift / small plate move-or-rotation after a power-cycle or bump WITHOUT
+# touching the 5-bar geometry. Identity = no correction (exact pass-through).
+IDENTITY_CORRECTION = {"a": 1.0, "b": 0.0, "cx": 0.0, "d": 0.0, "e": 1.0, "cy": 0.0}
+# Guardrails so a noisy/degenerate fit can never blow up a goto.
+_MAX_LINEAR_DEV = 0.02      # |a-1|,|b|,|d|,|e-1| beyond this -> reject scale/shear
+_MAX_SPAN_USTEPS = 12       # implied correction range over the plate beyond this -> reject
+_SNAP_IDENTITY = 0.5        # a fit this close to identity is snapped to exact identity
+
+
+def _is_identity(fc):
+    return (fc["a"] == 1.0 and fc["b"] == 0.0 and fc["cx"] == 0.0
+            and fc["d"] == 0.0 and fc["e"] == 1.0 and fc["cy"] == 0.0)
+
+
+def _apply_correction(fc, xm, ym):
+    return (int(round(fc["a"] * xm + fc["b"] * ym + fc["cx"])),
+            int(round(fc["d"] * xm + fc["e"] * ym + fc["cy"])))
+
+
 # ---------------------------------------------------------------------------
 # Simulation backend (mimics the bits of Microcontroller that PhilRobot uses)
 # ---------------------------------------------------------------------------
@@ -125,11 +146,13 @@ class PhilRobot:
             self.well_map.fit()
         # 5-bar kinematic model (best: real geometry -> any well/any labware)
         self.kin_model = KinematicModel.load() if KinematicModel else None
-        # joint-frame offset (X,Y) to recover the calibration after a power-cycle
-        # resets the firmware counters; set via reanchor(), persisted to disk.
+        # joint-frame correction to recover the calibration after a power-cycle
+        # or bump (set via reanchor()/anchor, persisted to disk). Affine over the
+        # raw model prediction; identity until fitted.
         cfg_dir = os.path.dirname(teach_path or paths.DEFAULT_TEACH_PATH)
         self._frame_path = os.path.join(cfg_dir, paths.FRAME_FILENAME)
-        self.joint_offset = (0.0, 0.0)
+        self.frame_correction = dict(IDENTITY_CORRECTION)
+        self._anchor_pts = {}           # well -> (measured_xy, model_xy) for fit
         self._last_joints = None        # last commanded (X,Y) for power-cycle detection
         self.frame_suspect = False      # True if the counter looks reset on connect
         self._load_frame()
@@ -475,14 +498,20 @@ class PhilRobot:
     def _resolve_well(self, well_id: str):
         """Joint target: 5-bar kinematics > RBF curve-fit > affine > corner interp.
 
-        The persisted joint-frame offset (from reanchor) is applied so the
-        permanent geometry calibration survives a controller power-cycle.
+        The persisted joint-frame correction (from reanchor/anchor) is applied so
+        the permanent geometry calibration survives a controller power-cycle.
         """
         tgt, src = self._resolve_raw(well_id)
-        dx, dy = self.joint_offset
-        if dx or dy:
-            tgt = {**tgt, "X": tgt["X"] + int(dx), "Y": tgt["Y"] + int(dy)}
-        return tgt, src
+        fc = self.frame_correction
+        if _is_identity(fc):
+            return tgt, src                      # exact pass-through (byte-identical)
+        x, y = _apply_correction(fc, tgt["X"], tgt["Y"])
+        return {**tgt, "X": x, "Y": y}, src
+
+    @property
+    def joint_offset(self):
+        """Back-compat: the translation part (cx, cy) of the frame correction."""
+        return (self.frame_correction["cx"], self.frame_correction["cy"])
 
     def _resolve_raw(self, well_id: str):
         if self.kin_model and self.kin_model.is_fitted:
@@ -505,18 +534,28 @@ class PhilRobot:
         try:
             with open(self._frame_path) as f:
                 d = json.load(f)
-            self.joint_offset = (float(d.get("dx", 0)), float(d.get("dy", 0)))
+            if "a" in d:                          # new affine schema
+                self.frame_correction = {k: float(d.get(k, IDENTITY_CORRECTION[k]))
+                                         for k in IDENTITY_CORRECTION}
+            else:                                 # back-compat: old {dx,dy} -> translation
+                fc = dict(IDENTITY_CORRECTION)
+                fc["cx"] = float(d.get("dx", 0)); fc["cy"] = float(d.get("dy", 0))
+                self.frame_correction = fc
             if "last_x" in d and "last_y" in d:
                 self._last_joints = (int(d["last_x"]), int(d["last_y"]))
         except Exception:
             pass
 
     def _save_frame(self, well=None):
-        d = {"dx": self.joint_offset[0], "dy": self.joint_offset[1]}
+        # Re-serialize the existing correction only -- never refit here (goto/close
+        # call this on every move).
+        d = dict(self.frame_correction)
         if self._last_joints is not None:
             d["last_x"], d["last_y"] = int(self._last_joints[0]), int(self._last_joints[1])
         if well:
             d["well"] = well.upper()
+        if self._anchor_pts:
+            d["anchors"] = sorted(self._anchor_pts)
         try:
             os.makedirs(os.path.dirname(self._frame_path), exist_ok=True)
             with open(self._frame_path, "w") as f:
@@ -544,6 +583,7 @@ class PhilRobot:
                   f"last session ({jump} usteps drift). Frame looks intact.")
 
     ANCHOR_WELL = "A1"   # standard reference well for reanchor / check
+    ANCHOR_WELLS = ("A1", "A12", "H1", "H12")   # 4 corners for the affine anchor
 
     def check(self, well_id: str = None):
         """Go to the anchor well so you can visually verify the calibration.
@@ -558,28 +598,103 @@ class PhilRobot:
               f"`reanchor {well_id.upper()}`.")
         return self.joint_position()
 
-    def reanchor(self, well_id: str = None):
-        """Recover the joint frame after a power-cycle or bump using ONE well.
-
-        Jog the outlet over ``well_id`` (default A1, the anchor well), then call
-        this. It compares the live joints to where the permanent geometry says
-        that well is, stores the constant offset, and every ``goto`` is corrected
-        from then on -- so the calibration never has to be re-taught.
+    def add_anchor(self, well_id: str):
+        """Capture ONE anchor: the live joints (you've jogged the outlet to center
+        ``well_id``) vs the raw model prediction. Collect 4 corners, then fit_anchor().
         """
-        well_id = well_id or self.ANCHOR_WELL
         self._require()
         if not (self.kin_model and self.kin_model.is_fitted):
-            raise RuntimeError("no kinematic model fitted; nothing to re-anchor to")
-        raw, _ = self._resolve_raw(well_id)
+            raise RuntimeError("no kinematic model fitted; nothing to anchor to")
+        raw, _ = self._resolve_raw(well_id)          # uncorrected model prediction
+        now = self.joint_position()                  # measured live joints
+        w = well_id.strip().upper()
+        self._anchor_pts[w] = ((now["X"], now["Y"]), (raw["X"], raw["Y"]))
+        print(f"  anchored {w}: measured ({now['X']},{now['Y']}) vs "
+              f"model ({raw['X']},{raw['Y']})  [{len(self._anchor_pts)} point(s); "
+              f"make sure the outlet was centered]")
+        return self._anchor_pts[w]
+
+    def clear_anchors(self):
+        self._anchor_pts = {}
+        print("  anchor points cleared.")
+
+    def _fit_correction(self):
+        """Fit frame_correction from self._anchor_pts. >=3 -> full affine (clamped),
+        else translation-only. Returns (correction, info_str)."""
+        import numpy as np
+        pts = list(self._anchor_pts.values())
+        meas = np.array([m for m, _ in pts], float)
+        mod = np.array([p for _, p in pts], float)
+        if len(pts) == 0:
+            return dict(IDENTITY_CORRECTION), "no anchors"
+        # translation-only candidate (always valid)
+        tx, ty = (meas - mod).mean(axis=0)
+        trans = dict(IDENTITY_CORRECTION); trans["cx"] = float(tx); trans["cy"] = float(ty)
+        if len(pts) < 3:
+            return trans, f"translation-only ({len(pts)} pt)"
+        # full 2D affine: [Xm,Ym,1] -> Xc ; [Xm,Ym,1] -> Yc
+        M = np.column_stack([mod[:, 0], mod[:, 1], np.ones(len(pts))])
+        (a, b, cx), *_ = np.linalg.lstsq(M, meas[:, 0], rcond=None)
+        (d, e, cy), *_ = np.linalg.lstsq(M, meas[:, 1], rcond=None)
+        aff = {"a": float(a), "b": float(b), "cx": float(cx),
+               "d": float(d), "e": float(e), "cy": float(cy)}
+        # --- guardrails: reject scale/shear or spans that smell like fitted noise ---
+        lin_ok = (abs(a - 1) <= _MAX_LINEAR_DEV and abs(b) <= _MAX_LINEAR_DEV
+                  and abs(d) <= _MAX_LINEAR_DEV and abs(e - 1) <= _MAX_LINEAR_DEV)
+        # implied affine-vs-translation correction span across the taught wells
+        span = 0.0
+        try:
+            allmod = np.array(
+                [(p["X"], p["Y"]) for p in
+                 (self.kin_model.predict(w, self.plate) for w in self.teach_table.taught)],
+                float)
+            ax = a * allmod[:, 0] + b * allmod[:, 1] + cx
+            ay = d * allmod[:, 0] + e * allmod[:, 1] + cy
+            tx2 = allmod[:, 0] + trans["cx"]; ty2 = allmod[:, 1] + trans["cy"]
+            span = float(np.max(np.abs(ax - tx2)) + np.max(np.abs(ay - ty2)))
+        except Exception:
+            span = 0.0
+        if not lin_ok or span > _MAX_SPAN_USTEPS:
+            return trans, (f"affine rejected (lin_ok={lin_ok}, span={span:.1f}) "
+                           f"-> translation-only")
+        # snap near-identity to exact identity
+        if (abs(a - 1) < 1e-6 and abs(e - 1) < 1e-6 and abs(b) < 1e-6 and abs(d) < 1e-6
+                and abs(cx) <= _SNAP_IDENTITY and abs(cy) <= _SNAP_IDENTITY):
+            return dict(IDENTITY_CORRECTION), "snap-to-identity"
+        return aff, f"full affine ({len(pts)} pts)"
+
+    def fit_anchor(self):
+        """Fit the joint-frame correction from the collected anchors and save it."""
+        self._require()
+        fc, info = self._fit_correction()
+        self.frame_correction = fc
+        # residual per anchor after correction
+        res = []
+        for w, ((mx, my), (xm, ym)) in self._anchor_pts.items():
+            cx, cy = _apply_correction(fc, xm, ym)
+            res.append((w, abs(cx - mx) + abs(cy - my)))
         now = self.joint_position()
-        self.joint_offset = (now["X"] - raw["X"], now["Y"] - raw["Y"])
         self._last_joints = (now["X"], now["Y"])
         self.frame_suspect = False
-        self._save_frame(well=well_id)
-        print(f"re-anchored on {well_id.upper()}: frame offset "
-              f"X={self.joint_offset[0]:+d} Y={self.joint_offset[1]:+d} "
-              f"(saved; calibration preserved, no re-teach needed)")
-        return self.joint_offset
+        self._save_frame(well=",".join(sorted(self._anchor_pts)))
+        rs = ", ".join(f"{w}:{e}" for w, e in res)
+        print(f"anchor fit [{info}] saved. residual usteps: {rs or '(none)'}")
+        print(f"  correction: a={fc['a']:.4f} b={fc['b']:.4f} cx={fc['cx']:+.1f} | "
+              f"d={fc['d']:.4f} e={fc['e']:.4f} cy={fc['cy']:+.1f}")
+        return fc
+
+    def reanchor(self, well_id: str = None):
+        """One-well recovery after a power-cycle or bump (pure translation).
+
+        Jog the outlet over ``well_id`` (default A1), then call this. Equivalent to
+        ``add_anchor`` + ``fit_anchor`` with a single point. For a sharper edge fix,
+        anchor the 4 corners (A1, A12, H1, H12) and fit_anchor().
+        """
+        well_id = well_id or self.ANCHOR_WELL
+        self.clear_anchors()
+        self.add_anchor(well_id)
+        fc = self.fit_anchor()
+        return (fc["cx"], fc["cy"])
 
     def fit_kinematics(self, n_starts: int = 400):
         """(Re)fit the 5-bar geometry from the taught wells and save it."""

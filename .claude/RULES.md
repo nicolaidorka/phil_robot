@@ -20,7 +20,9 @@
   them on purpose.)
 - **Don't use `backend="stock"`** on this unit — the 8/24 protocol is rejected.
   Use `backend="legacy"`.
-- **Don't re-teach after a power-cycle.** Use `reanchor <well>`.
+- **Don't re-teach after a power-cycle.** Use `reanchor <well>` (1-well, translation).
+  For a sharper edge fix, anchor the 4 corners: `anchor A1/A12/H1/H12` then `anchor fit`
+  (affine correction; never refit the 5-bar — that's non-convex and can regress).
 
 ## Day-to-day
 - Run from `software/`. `python3 -m phil.cli`, then `goto <well>`.
