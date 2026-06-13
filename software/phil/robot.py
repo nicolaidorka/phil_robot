@@ -278,6 +278,12 @@ class PhilRobot:
             # the counter persists across reconnects (only a true power-cycle re-zeros,
             # recovered with reanchor). Deliberate zeroing is via set_home().
             time.sleep(0.3)
+            # def_phil.h ships a slow 4 mm/s bring-up profile, which makes jogging
+            # laggy and goto slow. v2 applies vel/accel live (no reflash), so set a
+            # usable-but-still-gentle speed. (opcode 22; does NOT touch the counter.)
+            self.mc.set_max_velocity_acceleration(C.AXIS_X, 12.0, 150.0)
+            self.mc.set_max_velocity_acceleration(C.AXIS_Y, 12.0, 150.0)
+            self.mc.set_max_velocity_acceleration(C.AXIS_Z, 4.0, 40.0)
             self.connected = True
             print(f"PhilRobot connected (backend=v2, microstep; frame preserved). "
                   f"{self.teach_table.summary()}")

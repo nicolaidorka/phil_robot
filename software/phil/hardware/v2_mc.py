@@ -55,6 +55,7 @@ SCALE = 1
 MOVE_X, MOVE_Y, MOVE_Z = 0, 1, 2
 HOME_OR_ZERO = 5
 MOVETO_X, MOVETO_Y, MOVETO_Z = 6, 7, 8
+SET_MAX_VELOCITY_ACCELERATION = 22
 SET_AXIS_DISABLE_ENABLE = 32
 INITIALIZE = 254
 RESET = 255
@@ -214,10 +215,13 @@ class V2Microcontroller:
         pass
 
     def set_max_velocity_acceleration(self, axis, velocity, acceleration):
-        # v2 DOES honor vel/accel, but the firmware loads def_phil.h defaults at
-        # startup. Encoding SET_MAX_VELOCITY_ACCELERATION (opcode 22) is deferred
-        # until after basic-motion bring-up; defaults are safe meanwhile.
-        return
+        # Firmware opcode 22: vel_mm = (p1*256+p2)/100, acc_mm = (p3*256+p4)/10
+        # (axis in p0). v2 applies it live to the TMC4361A ramp -- used to speed up
+        # the slow def_phil.h bring-up profile so jogging isn't laggy.
+        v = max(0, min(65535, int(round(velocity * 100))))
+        a = max(0, min(65535, int(round(acceleration * 10))))
+        self._send(SET_MAX_VELOCITY_ACCELERATION, axis,
+                   (v >> 8) & 0xFF, v & 0xFF, (a >> 8) & 0xFF, a & 0xFF)
 
     def set_axis_enable_disable(self, axis, status):
         # SET_AXIS_DISABLE_ENABLE: payload [axis, status]. FIRMWARE polarity:
