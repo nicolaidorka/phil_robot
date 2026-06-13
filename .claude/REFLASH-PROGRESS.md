@@ -68,21 +68,30 @@ FIXED in this state:
 - [x] **Polarity comment bug**: v2_mc.py `set_axis_enable_disable` comment had enable/disable backwards.
       Firmware truth: status==0 disables, !=0 enables. Comment corrected; behavior is transparent pass-through.
 
-MUST FIX before flashing (still open — all in the TODO):
-- [ ] **`.ino` include still selects `def_octopi_80120.h`** (line 9), NOT def_phil.h. Flashing as-is would
-      load the wrong stage's current/joystick. Comment line 9, add `#include "def_phil.h"`. (CRITICAL)
-- [ ] **backend="v2" not wired** in robot.py — it currently falls through to the stock Qt driver. Add an
-      `elif backend=="v2"` branch building V2Microcontroller, with a connect path that does ONE
-      `initialize_drivers()` (applies def_phil.h current/ustep/ramp) and does NOT auto-`reset()`. (CRITICAL)
-- [ ] **Count constants ~32x too small** at the new microstep scale (~175 microsteps/mm at the tip vs legacy
-      ~5.5/mm). Rescale by 32: robot.py MOVE_CHUNK_USTEPS(40→~1280), APPROACH_PRE_USTEPS(80→~2560),
-      APPROACH_CONFIRM_TOL & OK(8→~256), APPROACH_MAX_CORRECTION(30→~960), FRAME_RESET_THRESHOLD(80→~2560),
-      _MAX_SPAN_USTEPS(12→~384), the line-564 noise gate(16→~512); jog_teach.STEPS → ~[64,128,256,512,1024];
-      set constants.MICROSTEPPING_*=256 (fixes the real Z mm-path too). _MAX_LINEAR_DEV is dimensionless—leave.
-      Best done as a single SCALE/USTEPS_PER_MM source shared by both backends. (CRITICAL)
+MUST FIX before flashing:
+- [x] **`.ino` include** switched to `#include "def_phil.h"` (def_octopi_80120 commented out).
+- [x] **backend="v2" wired** in robot.py: `elif backend=="v2"` builds V2Microcontroller; v2 connect path does
+      ONE `initialize_drivers()` (applies def_phil.h current/ustep/ramp), no auto-`reset()`.
+- [x] **Count constants rescaled** via a single `self._ustep_scale` (=32 for v2, 1 for legacy/sim) set in
+      __init__: MOVE_CHUNK_USTEPS, APPROACH_PRE/CONFIRM_TOL/OK_USTEPS/MAX_CORRECTION, FRAME_RESET_THRESHOLD all
+      ×scale; inline noise gate → `2*APPROACH_OK_USTEPS`; `_MAX_SPAN_USTEPS * self._ustep_scale` at use-site.
+      Verified by import: v2 → CHUNK 1280, TOL/OK 256, MAXCORR 960, FRAME 2560; legacy/sim unchanged.
+- [x] **jog_teach** takes `--v2` (builds backend=v2) and scales STEPS by `bot._ustep_scale` for re-teaching.
 - [ ] **Toolchain**: FastLED + PacketSerial libs not installed; needed to compile (PacketSerial is included
-      unconditionally even with joystick off). Install, then COMPILE .hex without flashing to prove it builds. (WARN)
-- [ ] un-hardcode `jog_teach.py` backend="legacy".
+      unconditionally even with joystick off). Install, then COMPILE .hex without flashing to prove it builds. (OPEN)
+- [ ] **mm-convenience path** (constants.MICROSTEPPING_*=8) is NOT yet 256: read_position()/move_to(mm)/soft
+      limits read 32x off on v2. NOT in the goto/teach critical path (those are count-based via the teach table),
+      so deferred; set MICROSTEPPING_*=256 if/when the mm helpers are used on v2. (OPEN, low priority)
+
+ROLLBACK FIRMWARE — can we get the current custom firmware back? (searched 2026-06-12)
+- NOT on this machine (no matching .hex; no source with the legacy 6-byte/20-byte protocol).
+- NEVER committed to this repo (git history only ever had octopi_firmware_v2 = the 8-byte protocol).
+- A Teensy 4.x flash CANNOT be read back → the running firmware is unrecoverable from the chip.
+- Upstream octopi-research is 8-byte (= our v2); the 6-byte custom build matches no upstream release.
+- BEST leads for a true byte-identical rollback: ask **Hongquan Li** (Squid/octopi author, likely built Phil's
+  firmware) / check his repos & any USB/lab machine. Until found, realistic rollback = flash v2-from-repo +
+  recalibrate (always works; a Teensy can't be bricked). The legacy calibration backup only helps IF the
+  legacy firmware is found.
 
 NOTED (not blocking bring-up):
 - X/Y current scale lands at CS=14 (firmware comment prefers >16); harmless, bump X/Y to ~570mA only if weak.

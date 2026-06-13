@@ -157,12 +157,18 @@ def main(argv=None):
     raw = list(argv if argv is not None else _sys.argv[1:])
     anchor_mode = "--anchor" in raw
     all_mode = "--all" in raw
-    raw = [a for a in raw if a not in ("--anchor", "--all")]
+    use_v2 = "--v2" in raw                      # post-reflash microstep firmware
+    raw = [a for a in raw if a not in ("--anchor", "--all", "--v2")]
     # When specific wells are named (re-teaching a few), auto-drive to each one
     # like --all does, so you just fine-center instead of jogging there by hand.
     auto_approach = all_mode or (not anchor_mode and bool(raw))
 
-    bot = PhilRobot(backend="legacy")
+    bot = PhilRobot(backend="v2" if use_v2 else "legacy")
+    # On v2 the joint counts are 32x finer (microsteps, not full-steps), so scale
+    # the jog increments to keep the same physical nudge sizes.
+    if bot._ustep_scale != 1:
+        global STEPS
+        STEPS = [s * bot._ustep_scale for s in STEPS]
     bot.connect()
 
     if anchor_mode:

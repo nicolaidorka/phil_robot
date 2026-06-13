@@ -181,6 +181,21 @@ class PhilRobot:
         self.connected = False
         self.homed = False
 
+        # Joint-count scale. The v2 microstep firmware reports/commands raw
+        # 256-microsteps, so its counts are 32x the legacy 8-ustep scale
+        # (legacy ~5.5 counts/mm at the tip -> v2 ~175 counts/mm). Rescale every
+        # count-based motion tunable by this factor so legacy and v2 produce the
+        # SAME physical legs / run-up / tolerances. (1 for legacy & sim.)
+        self._ustep_scale = 32 if self.backend == "v2" else 1
+        if self._ustep_scale != 1:
+            cls, s = type(self), self._ustep_scale
+            self.MOVE_CHUNK_USTEPS = cls.MOVE_CHUNK_USTEPS * s
+            self.APPROACH_PRE_USTEPS = cls.APPROACH_PRE_USTEPS * s
+            self.APPROACH_CONFIRM_TOL = cls.APPROACH_CONFIRM_TOL * s
+            self.APPROACH_OK_USTEPS = cls.APPROACH_OK_USTEPS * s
+            self.APPROACH_MAX_CORRECTION = cls.APPROACH_MAX_CORRECTION * s
+            self.FRAME_RESET_THRESHOLD = cls.FRAME_RESET_THRESHOLD * s
+
         # commanded position in robot mm (authoritative once homed/zeroed)
         self._pos = {"X": 0.0, "Y": 0.0, "Z": 0.0}
 
@@ -199,6 +214,10 @@ class PhilRobot:
             from .hardware.legacy_mc import LegacyMicrocontroller
             self.mc = LegacyMicrocontroller(
                 version=self._controller_version, sn=self._controller_sn)
+        elif self.backend == "v2":
+            from .hardware.v2_mc import V2Microcontroller
+            self.mc = V2Microcontroller(
+                version=self._controller_version, sn=self._controller_sn)
         else:
             self.mc = _connect_real_backend(self._controller_version, self._controller_sn)
 
@@ -210,6 +229,22 @@ class PhilRobot:
             time.sleep(0.3)
             self.connected = True
             print(f"PhilRobot connected (backend=legacy, frame preserved). "
+                  f"{self.teach_table.summary()}")
+            self._check_frame()
+            return
+
+        if self.backend == "v2":
+            # v2 microstep firmware: apply def_phil.h driver config (motor current,
+            # 256 microstepping, velocity/accel ramps) via INITIALIZE so the TMC2660
+            # drives at the intended (low) current. Do NOT reset() -- avoid zeroing
+            # the persisted joint frame; deliberate zeroing is via set_home(). The
+            # command grid is now microstep-fine (the whole point of the reflash).
+            time.sleep(0.3)
+            self.mc.initialize_drivers()
+            time.sleep(0.5)
+            self.mc.configure_actuators()
+            self.connected = True
+            print(f"PhilRobot connected (backend=v2, microstep). "
                   f"{self.teach_table.summary()}")
             self._check_frame()
             return
@@ -561,7 +596,8 @@ class PhilRobot:
                 break
             if abs(ex) > self.APPROACH_MAX_CORRECTION or abs(ey) > self.APPROACH_MAX_CORRECTION:
                 break                                               # implausible read -> trust move
-            a = 1.0 if (abs(ex) > 16 or abs(ey) > 16) else self.APPROACH_DAMPING
+            big = 2 * self.APPROACH_OK_USTEPS    # scales with backend (legacy 16, v2 512)
+            a = 1.0 if (abs(ex) > big or abs(ey) > big) else self.APPROACH_DAMPING
             cx += int(round(a * ex)); cy += int(round(a * ey))
 
     # ------------------------------------------------------------- home/zero
@@ -803,7 +839,7 @@ class PhilRobot:
             span = float(np.max(np.abs(ax - tx2)) + np.max(np.abs(ay - ty2)))
         except Exception:
             span = 0.0
-        if not lin_ok or span > _MAX_SPAN_USTEPS:
+        if not lin_ok or span > _MAX_SPAN_USTEPS * self._ustep_scale:
             return trans, (f"affine rejected (lin_ok={lin_ok}, span={span:.1f}) "
                            f"-> translation-only")
         # snap near-identity to exact identity
