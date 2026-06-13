@@ -1,0 +1,11 @@
+Pre-reflash snapshot of Phil's LEGACY-firmware calibration (2026-06-12).
+These files are the exact teach/fit/frame for the CURRENT custom full-step firmware.
+
+If we roll BACK to the legacy firmware (.ino found) + backend="legacy":
+  restore all four .json files from here into ../  and the robot behaves exactly as before the reflash.
+
+Do NOT use these unchanged with the v2 microstep firmware: the joint-count scale changes, so v2 needs a
+fresh teach/fit. Keep these only as the legacy rollback point.
+
+Legacy scale facts: LEGACY_MICROSTEPPING=256, REPO_MICROSTEPPING=8, CMD_DIVISOR=32, FULLSTEP_DIVISOR=8.
+Teensy SN 16640550. Board: Squid/octopi V4, Teensy 4.1, TMC4361ALA + TMC2660C drivers.

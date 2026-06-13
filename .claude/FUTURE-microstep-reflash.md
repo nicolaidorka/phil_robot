@@ -1,7 +1,9 @@
-# PARKED: Reflash Phil's Teensy to microstep-capable firmware
+# Reflash Phil's Teensy to microstep-capable firmware
 
-**Status: not being done now.** This is a saved reference. Do NOT flash anything based on this without
-first clearing the two prerequisites below. Nothing here touches the robot.
+**Status: ACTIVE (un-parked 2026-06-12).** Gate 1 (board compatibility) is CLEARED — see the live log
+[REFLASH-PROGRESS.md](REFLASH-PROGRESS.md), which has the confirmed hardware IDs, the verified v2 serial
+protocol, and what's built so far. This file remains the background/rationale + the safe sequence.
+Nothing here touches the robot until the explicit flash step.
 
 ## Goal & why parked
 Goal would be finer well-to-well positioning. Phil's *current* firmware only accepts whole **full-step**
