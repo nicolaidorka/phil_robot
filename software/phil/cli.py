@@ -173,7 +173,8 @@ def main(argv=None):
     ap.add_argument("--simulate", action="store_true", help="no hardware; in-memory backend")
     ap.add_argument("--labware", default=None, help="path to labware JSON")
     ap.add_argument("--teach", default=None, help="path to teach-table JSON")
-    ap.add_argument("--backend", default="legacy", choices=["legacy", "stock", "sim"])
+    ap.add_argument("--backend", default="legacy",
+                    choices=["legacy", "v2", "stock", "sim"])
     ap.add_argument("--version", default="Teensy", help="controller version")
     ap.add_argument("-c", "--command", action="append", default=[],
                     help="run a command then continue (repeatable)")

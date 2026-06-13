@@ -154,6 +154,24 @@ W4 the joint-space goto path bypasses mm soft-limits (firmware MOVETO is unclamp
 removes the main hazard; consider a coarse joint-count sanity bound later. N: some legacy-era code comments
 ("firmware ignores accel", "8-ustep grid") are stale on v2 (cosmetic).
 
+## Final review (4 agents, 2026-06-12) — verdict GO; bring-up bugs FIXED
+Go/no-go audit: firmware compiles, all backends construct correctly, every claimed fix present -> GO.
+Bring-up walkthrough found workflow bugs (now fixed):
+- [x] **set_home() didn't zero on v2** (firmware RESET only clears cmd_id, doesn't zero the counter) yet printed
+      success. FIX: set_home() on v2 uses zero_x/y/z (HOME_OR_ZERO_ZERO); legacy keeps reset()+init.
+- [x] **CLI couldn't select v2** (`--backend` choices lacked it). FIX: added "v2".
+- [x] **jog_teach couldn't target a 384 / separate teach file.** FIX: added `--labware <name>` and `--teach
+      <path>` so 96 and 384 teach into separate JSONs. (e.g. `jog_teach --v2 --all --labware <384.json> --teach config/phil_teach_384.json`)
+- [x] **goto/gotopos silently skip the Z lift if travel-Z unset** (collision risk, esp. for WASTE). FIX: both
+      now warn loudly when z_travel_usteps is None. (Set `travelz <usteps>` before any goto.)
+Confirmed NOT a bug (agent misanalysis): the mm-path *32 scale is correct for Z (the real-mm axis: ratio IS 32);
+only the notional X/Y "mm" differ, and those aren't physically meaningful for the rotary arm.
+Verified: compiles; CLI accepts v2; 384 labware loads (16x24, corners A1/A24/P1/P24); all construct clean.
+
+READINESS: code is GO. Human steps before/at flash: sudo install udev rule; flash firmware/build/*.hex;
+first-jog verify axis map (x=1/y=0) + direction + motor temp; on v2 zero with set_home (NOT homing);
+re-teach `jog_teach --v2 --all`; set `travelz`; then goto/teach WASTE. Verify Teensy doesn't reset-on-connect.
+
 ## Rollback
 - Legacy `.ino` found → flash it, set `backend="legacy"`, restore the 4 backup .json. Byte-identical.
 - Not found → stay on v2-from-repo + recalibrate (always available). A Teensy can't be bricked

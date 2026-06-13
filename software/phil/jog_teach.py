@@ -159,11 +159,24 @@ def main(argv=None):
     all_mode = "--all" in raw
     use_v2 = "--v2" in raw                      # post-reflash microstep firmware
     raw = [a for a in raw if a not in ("--anchor", "--all", "--v2")]
+    # --labware <name> and --teach <path>: teach a non-default plate (e.g. a 384)
+    # into its own teach file, so 96 and 384 don't co-mingle in one JSON.
+    labware = teach = None
+    rest, it = [], iter(raw)
+    for a in it:
+        if a == "--labware":
+            labware = next(it, None)
+        elif a == "--teach":
+            teach = next(it, None)
+        else:
+            rest.append(a)
+    raw = rest
     # When specific wells are named (re-teaching a few), auto-drive to each one
     # like --all does, so you just fine-center instead of jogging there by hand.
     auto_approach = all_mode or (not anchor_mode and bool(raw))
 
-    bot = PhilRobot(backend="v2" if use_v2 else "legacy")
+    bot = PhilRobot(backend="v2" if use_v2 else "legacy",
+                    labware_path=labware, teach_path=teach)
     # On v2 the joint counts are 32x finer (microsteps, not full-steps), so scale
     # the jog increments to keep the same physical nudge sizes, and STAMP the teach
     # table as v2-scale so goto will accept the freshly-taught data.

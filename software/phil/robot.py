@@ -651,17 +651,24 @@ class PhilRobot:
 
     # ------------------------------------------------------------- home/zero
     def set_home(self):
-        """Zero the joints at the CURRENT pose (manual home reference).
+        """Zero the joints at the CURRENT pose (manual home reference), no motion.
 
-        Safe: uses reset (which zeros the position counters with no motion),
-        then re-initializes the drivers. Jog the arm to a repeatable physical
-        reference first, then call this so taught wells survive across sessions.
+        Jog the arm to a repeatable physical reference first, then call this so
+        taught wells survive across sessions.
         """
         self._require()
-        self.mc.reset()
-        time.sleep(1.0)
-        self.mc.initialize_drivers()
-        time.sleep(1.0)
+        if self.backend == "v2":
+            # The v2 firmware RESET does NOT zero the position counter (it only
+            # clears cmd_id); only HOME_OR_ZERO_ZERO zeroes. Use the zero commands.
+            self.mc.zero_x(); self._wait()
+            self.mc.zero_y(); self._wait()
+            self.mc.zero_z(); self._wait()
+        else:
+            # Legacy custom firmware zeroes the counters on RESET (no motion).
+            self.mc.reset()
+            time.sleep(1.0)
+            self.mc.initialize_drivers()
+            time.sleep(1.0)
         self._pos = {"X": 0.0, "Y": 0.0, "Z": 0.0}
         self.homed = True
         print(f"home set at current pose; joints now {self.joint_position()}")
@@ -957,6 +964,9 @@ class PhilRobot:
             self._approach_joints(tgt["X"], tgt["Y"])     # creep in like the teach jogs
             self._move_joints_to(z=tgt["Z"])              # descend to the well
         else:
+            if safe and self.teach_table.z_travel_usteps is None:
+                print("  ** no travel-Z set (run `travelz <usteps>`); moving WITHOUT a "
+                      "lift — risk of dragging the nozzle across the plate.")
             self._approach_joints(tgt["X"], tgt["Y"])     # creep in like the teach jogs
             self._move_joints_to(z=tgt["Z"])              # set Z
         self._last_joints = (tgt["X"], tgt["Y"])          # checkpoint for frame-reset detection
@@ -1004,6 +1014,9 @@ class PhilRobot:
             self._approach_joints(tgt["X"], tgt["Y"])     # traverse + close in
             self._move_joints_to(z=tgt["Z"])              # descend to dispense height
         else:
+            if safe and self.teach_table.z_travel_usteps is None:
+                print("  ** no travel-Z set (run `travelz <usteps>`); moving to the side "
+                      "WITHOUT a lift — risk of hitting the plate wall. Set travel-Z first.")
             self._approach_joints(tgt["X"], tgt["Y"])
             self._move_joints_to(z=tgt["Z"])
         self._last_joints = (tgt["X"], tgt["Y"])
