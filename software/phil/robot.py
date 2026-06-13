@@ -277,27 +277,30 @@ class PhilRobot:
             return
 
         if self.backend == "v2":
-            # v2 firmware configures the TMC drivers at BOOT (def_phil.h); the host must
-            # NOT send INITIALIZE (it chip-resets XACTUAL and wipes the frame).
+            # The boot-time driver init alone leaves the TMC4361A unable to RAMP (motors
+            # won't jog -- found the hard way during bring-up). The host INITIALIZE makes
+            # them movable, but it ZEROS the position counter -- so send INITIALIZE and then
+            # immediately RESTORE the saved joint frame via SET_POSITION. Net: movable motors
+            # AND a preserved frame across reconnects/power-cycles. SET_POSITION is atomic
+            # (no motion) and aligns XTARGET=XACTUAL so the velocity command below can't
+            # lunge the arm. (Open-loop rule: arm not hand-moved while off, so the saved
+            # pose == the physical pose.)
             time.sleep(0.3)
-            # RESTORE the saved open-loop joint frame into the firmware's counter FIRST.
-            # This (a) recovers the frame after a power-cycle (the only event that zeros
-            # XACTUAL) and (b) aligns XTARGET=XACTUAL so the velocity command below (which
-            # flips the chip to position mode) can't lunge the arm to a stale target.
-            # SET_POSITION is atomic -- no motion. (Open-loop rule: arm not hand-moved
-            # while off, so the saved pose == the physical pose.)
             if self._last_joints is not None:
-                lx, ly, lz, _ = self.mc.get_pos()        # what the firmware thinks NOW
-                drift = abs(lx - self._last_joints[0]) + abs(ly - self._last_joints[1])
-                if drift > self.FRAME_RESET_THRESHOLD:
-                    print(f"  ** firmware counter ({lx},{ly}) != saved "
-                          f"{self._last_joints}; restoring the saved frame "
-                          f"(if the arm was hand-moved while off, run `reanchor A1`).")
+                lx, ly, _, _ = self.mc.get_pos()          # firmware counter BEFORE re-init
+                if (abs(lx - self._last_joints[0]) + abs(ly - self._last_joints[1])
+                        > self.FRAME_RESET_THRESHOLD) and (lx or ly):
+                    self.frame_suspect = True
+                    print(f"  ** firmware counter ({lx},{ly}) != saved {self._last_joints}; "
+                          f"restoring it (if the arm was hand-moved while off, `reanchor A1`).")
+            self.mc.initialize_drivers()                  # make the drivers able to ramp (zeros counter)
+            time.sleep(0.8)
+            if self._last_joints is not None:             # restore the frame INITIALIZE just zeroed
                 self.mc.set_position_usteps(C.AXIS_X, self._last_joints[0])
                 self.mc.set_position_usteps(C.AXIS_Y, self._last_joints[1])
                 if self._last_z is not None:
                     self.mc.set_position_usteps(C.AXIS_Z, self._last_z)
-                time.sleep(0.05)                          # let the SPI writes land
+                time.sleep(0.05)
             # def_phil.h ships a slow 4 mm/s bring-up profile; v2 applies vel/accel live.
             self.mc.set_max_velocity_acceleration(C.AXIS_X, 12.0, 150.0)
             self.mc.set_max_velocity_acceleration(C.AXIS_Y, 12.0, 150.0)
