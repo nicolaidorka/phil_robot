@@ -263,17 +263,15 @@ class PhilRobot:
             return
 
         if self.backend == "v2":
-            # v2 microstep firmware: apply def_phil.h driver config (motor current,
-            # 256 microstepping, velocity/accel ramps) via INITIALIZE so the TMC2660
-            # drives at the intended (low) current. Do NOT reset() -- avoid zeroing
-            # the persisted joint frame; deliberate zeroing is via set_home(). The
-            # command grid is now microstep-fine (the whole point of the reflash).
+            # The v2 firmware configures the TMC drivers (current / 256 microstepping /
+            # ramps from def_phil.h) at BOOT in setup(), so the host must NOT send
+            # INITIALIZE on connect: empirically INITIALIZE zeros the position counter,
+            # which would wipe the joint frame on every reconnect. Just open and go --
+            # the counter persists across reconnects (only a true power-cycle re-zeros,
+            # recovered with reanchor). Deliberate zeroing is via set_home().
             time.sleep(0.3)
-            self.mc.initialize_drivers()
-            time.sleep(0.5)
-            self.mc.configure_actuators()
             self.connected = True
-            print(f"PhilRobot connected (backend=v2, microstep). "
+            print(f"PhilRobot connected (backend=v2, microstep; frame preserved). "
                   f"{self.teach_table.summary()}")
             self._check_frame()
             return
