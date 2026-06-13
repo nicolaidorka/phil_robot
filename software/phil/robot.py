@@ -206,6 +206,14 @@ class PhilRobot:
             self.frame_correction = dict(IDENTITY_CORRECTION)
             self._last_joints = None
             self.frame_suspect = False
+            # The on-disk 5-bar fit (phil_kinematics.json) and affine calibration
+            # (phil_calibration.json) are in LEGACY units -- no v2 kinematic fit exists
+            # yet -- so on v2 they would resolve UNTAUGHT wells ~32x too small (a big
+            # wrong move). Drop them so untaught wells fall to the v2-scale well_map /
+            # 4-corner bilinear built from the current teach table. Re-build with
+            # `fitkin` once enough v2 wells are taught.
+            self.kin_model = None
+            self.calibration = Calibration.nominal(self.plate)
             # Legacy-scale teach/kinematics data would be commanded as raw microsteps
             # (32x too small) -> wrong moves. If the loaded teach table isn't marked
             # v2-scale (ustep_scale==256), DROP it (and the legacy fit) so goto can't
