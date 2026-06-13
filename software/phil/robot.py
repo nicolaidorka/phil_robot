@@ -693,11 +693,13 @@ class PhilRobot:
         """
         self._require()
         if self.backend == "v2":
-            # The v2 firmware RESET does NOT zero the position counter (it only
-            # clears cmd_id); only HOME_OR_ZERO_ZERO zeroes. Use the zero commands.
-            self.mc.zero_x(); self._wait()
-            self.mc.zero_y(); self._wait()
-            self.mc.zero_z(); self._wait()
+            # Zero the counter via SET_POSITION (direct XACTUAL/X_TARGET write) -- NOT
+            # HOME_OR_ZERO_ZERO, which uses tmc4361A_setCurrentPosition (VMAX=0 +
+            # velocity_mode) and can leave the axis unable to ramp afterward.
+            self.mc.set_position_usteps(C.AXIS_X, 0)
+            self.mc.set_position_usteps(C.AXIS_Y, 0)
+            self.mc.set_position_usteps(C.AXIS_Z, 0)
+            time.sleep(0.05)
         else:
             # Legacy custom firmware zeroes the counters on RESET (no motion).
             self.mc.reset()

@@ -897,27 +897,40 @@ void loop() {
           }
         case SET_POSITION:
           {
-            // Set the position COUNTER (XACTUAL) to an absolute value WITHOUT moving:
-            // tmc4361A_setCurrentPosition writes VMAX=0, XACTUAL=value, moveTo(value) so
-            // XTARGET==XACTUAL. Used by the host to restore the open-loop joint frame on
-            // connect (and to align XTARGET before a velocity command). Atomic — does NOT
-            // set *_commanded_movement_in_progress or mcu_cmd_execution_in_progress.
+            // Set the position COUNTER to an absolute value WITHOUT moving. Write XACTUAL
+            // and X_TARGET directly (so XACTUAL==XTARGET -> no motion) and leave the ramp
+            // generator's mode/VMAX untouched. (Do NOT use tmc4361A_setCurrentPosition: it
+            // writes VMAX=0 and sets velocity_mode=true, which can leave an axis unable to
+            // ramp afterward.) Atomic -- no movement/exec flags. Host uses this to restore
+            // the open-loop joint frame on connect.
             int axis = buffer_rx[2];
             long absolute_position = int32_t(uint32_t(buffer_rx[3]) * 16777216 + uint32_t(buffer_rx[4]) * 65536 + uint32_t(buffer_rx[5]) * 256 + uint32_t(buffer_rx[6]));
             switch (axis)
             {
               case AXIS_X:
-                tmc4361A_setCurrentPosition(&tmc4361[x], absolute_position);
+                tmc4361A_writeInt(&tmc4361[x], TMC4361A_VMAX, 0);                  // no motion while we rewrite position
+                tmc4361A_writeInt(&tmc4361[x], TMC4361A_XACTUAL, absolute_position);
+                tmc4361A_writeInt(&tmc4361[x], TMC4361A_X_TARGET, absolute_position); // XACTUAL==XTARGET
+                tmc4361A_sRampInit(&tmc4361[x]);                                  // restore s-ramp + VMAX, POSITION mode
+                tmc4361[x].velocity_mode = false;
                 X_pos = absolute_position;
                 X_commanded_target_position = absolute_position;
                 break;
               case AXIS_Y:
-                tmc4361A_setCurrentPosition(&tmc4361[y], absolute_position);
+                tmc4361A_writeInt(&tmc4361[y], TMC4361A_VMAX, 0);
+                tmc4361A_writeInt(&tmc4361[y], TMC4361A_XACTUAL, absolute_position);
+                tmc4361A_writeInt(&tmc4361[y], TMC4361A_X_TARGET, absolute_position);
+                tmc4361A_sRampInit(&tmc4361[y]);
+                tmc4361[y].velocity_mode = false;
                 Y_pos = absolute_position;
                 Y_commanded_target_position = absolute_position;
                 break;
               case AXIS_Z:
-                tmc4361A_setCurrentPosition(&tmc4361[z], absolute_position);
+                tmc4361A_writeInt(&tmc4361[z], TMC4361A_VMAX, 0);
+                tmc4361A_writeInt(&tmc4361[z], TMC4361A_XACTUAL, absolute_position);
+                tmc4361A_writeInt(&tmc4361[z], TMC4361A_X_TARGET, absolute_position);
+                tmc4361A_sRampInit(&tmc4361[z]);
+                tmc4361[z].velocity_mode = false;
                 Z_pos = absolute_position;
                 Z_commanded_target_position = absolute_position;
                 focusPosition = absolute_position;
