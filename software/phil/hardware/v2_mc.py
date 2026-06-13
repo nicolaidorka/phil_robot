@@ -55,6 +55,7 @@ SCALE = 1
 MOVE_X, MOVE_Y, MOVE_Z = 0, 1, 2
 HOME_OR_ZERO = 5
 MOVETO_X, MOVETO_Y, MOVETO_Z = 6, 7, 8
+SET_POSITION = 19
 SET_MAX_VELOCITY_ACCELERATION = 22
 SET_AXIS_DISABLE_ENABLE = 32
 INITIALIZE = 254
@@ -174,6 +175,14 @@ class V2Microcontroller:
     def move_x_to_usteps(self, u): self._send_pos(MOVETO_X, u)
     def move_y_to_usteps(self, u): self._send_pos(MOVETO_Y, u)
     def move_z_to_usteps(self, u): self._send_pos(MOVETO_Z, u)
+
+    def set_position_usteps(self, axis, microsteps):
+        """Force the firmware position counter (XACTUAL) for `axis` (0=X,1=Y,2=Z) to
+        `microsteps` -- NO motion, no chip reset. The firmware aligns XTARGET=XACTUAL.
+        Used to restore the open-loop joint frame on connect. Opcode 19:
+        payload [axis, int32 BE microsteps]. expect_ack=False (atomic, no COMPLETED)."""
+        b = _s32(int(round(microsteps / SCALE)))
+        self._send(SET_POSITION, axis, b[0], b[1], b[2], b[3], expect_ack=False)
 
     # home/zero: payload [axis, mode]; mode=HOME_OR_ZERO_ZERO sets current pos = 0
     def home_x(self): self._send(HOME_OR_ZERO, AXIS["X"], HOME_NEGATIVE)

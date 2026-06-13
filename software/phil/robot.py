@@ -167,7 +167,9 @@ class PhilRobot:
         self._frame_path = os.path.join(cfg_dir, paths.FRAME_FILENAME)
         self.frame_correction = dict(IDENTITY_CORRECTION)
         self._anchor_pts = {}           # well -> (measured_xy, model_xy) for fit
-        self._last_joints = None        # last commanded (X,Y) for power-cycle detection
+        self._last_joints = None        # last (X,Y) joints: persisted + restored on connect
+        self._last_z = None             # last Z joints: persisted + restored on connect
+        self._frame_scale = None        # ustep scale the saved frame was written in (256=v2, 8=legacy)
         self.frame_suspect = False      # True if the counter looks reset on connect
         self._load_frame()
 
@@ -200,12 +202,16 @@ class PhilRobot:
             self.APPROACH_CONFIRM_TIMEOUT = 8.0
 
         if self.backend == "v2":
-            # A persisted phil_frame.json reanchor offset is in LEGACY ustep units;
-            # applied on v2 it would be a 32x-too-small shift. Start from identity and
-            # re-anchor fresh on v2 (the geometry is re-taught at the finer scale anyway).
-            self.frame_correction = dict(IDENTITY_CORRECTION)
-            self._last_joints = None
             self.frame_suspect = False
+            # The saved phil_frame.json (affine correction + absolute last_x/y/z) is in the
+            # units of whatever firmware wrote it. KEEP it only if it's v2-scale
+            # (ustep_scale==256) -- that's what makes restore-on-connect work. A legacy
+            # frame would apply a 32x-wrong shift / restore a wrong absolute position, so
+            # drop it to identity + no-restore (re-anchor / re-teach fresh on v2).
+            if (self._frame_scale or 8) != 256:
+                self.frame_correction = dict(IDENTITY_CORRECTION)
+                self._last_joints = None
+                self._last_z = None
             # The on-disk 5-bar fit (phil_kinematics.json) and affine calibration
             # (phil_calibration.json) are in LEGACY units -- no v2 kinematic fit exists
             # yet -- so on v2 they would resolve UNTAUGHT wells ~32x too small (a big
@@ -271,21 +277,33 @@ class PhilRobot:
             return
 
         if self.backend == "v2":
-            # The v2 firmware configures the TMC drivers (current / 256 microstepping /
-            # ramps from def_phil.h) at BOOT in setup(), so the host must NOT send
-            # INITIALIZE on connect: empirically INITIALIZE zeros the position counter,
-            # which would wipe the joint frame on every reconnect. Just open and go --
-            # the counter persists across reconnects (only a true power-cycle re-zeros,
-            # recovered with reanchor). Deliberate zeroing is via set_home().
+            # v2 firmware configures the TMC drivers at BOOT (def_phil.h); the host must
+            # NOT send INITIALIZE (it chip-resets XACTUAL and wipes the frame).
             time.sleep(0.3)
-            # def_phil.h ships a slow 4 mm/s bring-up profile, which makes jogging
-            # laggy and goto slow. v2 applies vel/accel live (no reflash), so set a
-            # usable-but-still-gentle speed. (opcode 22; does NOT touch the counter.)
+            # RESTORE the saved open-loop joint frame into the firmware's counter FIRST.
+            # This (a) recovers the frame after a power-cycle (the only event that zeros
+            # XACTUAL) and (b) aligns XTARGET=XACTUAL so the velocity command below (which
+            # flips the chip to position mode) can't lunge the arm to a stale target.
+            # SET_POSITION is atomic -- no motion. (Open-loop rule: arm not hand-moved
+            # while off, so the saved pose == the physical pose.)
+            if self._last_joints is not None:
+                lx, ly, lz, _ = self.mc.get_pos()        # what the firmware thinks NOW
+                drift = abs(lx - self._last_joints[0]) + abs(ly - self._last_joints[1])
+                if drift > self.FRAME_RESET_THRESHOLD:
+                    print(f"  ** firmware counter ({lx},{ly}) != saved "
+                          f"{self._last_joints}; restoring the saved frame "
+                          f"(if the arm was hand-moved while off, run `reanchor A1`).")
+                self.mc.set_position_usteps(C.AXIS_X, self._last_joints[0])
+                self.mc.set_position_usteps(C.AXIS_Y, self._last_joints[1])
+                if self._last_z is not None:
+                    self.mc.set_position_usteps(C.AXIS_Z, self._last_z)
+                time.sleep(0.05)                          # let the SPI writes land
+            # def_phil.h ships a slow 4 mm/s bring-up profile; v2 applies vel/accel live.
             self.mc.set_max_velocity_acceleration(C.AXIS_X, 12.0, 150.0)
             self.mc.set_max_velocity_acceleration(C.AXIS_Y, 12.0, 150.0)
             self.mc.set_max_velocity_acceleration(C.AXIS_Z, 4.0, 40.0)
             self.connected = True
-            print(f"PhilRobot connected (backend=v2, microstep; frame preserved). "
+            print(f"PhilRobot connected (backend=v2, microstep; frame restored). "
                   f"{self.teach_table.summary()}")
             self._check_frame()
             return
@@ -329,7 +347,7 @@ class PhilRobot:
             try:
                 if self.connected and not self.simulate:
                     j = self.joint_position()      # checkpoint last pose for frame detection
-                    self._last_joints = (j["X"], j["Y"])
+                    self._last_joints = (j["X"], j["Y"]); self._last_z = j["Z"]
                     self._save_frame()
             except Exception:
                 pass
@@ -551,7 +569,12 @@ class PhilRobot:
             self.mc.move_y_usteps(int(dy)); self._wait()
         if dz:
             self.mc.move_z_usteps(int(dz)); self._wait()
-        return self.joint_position()
+        p = self.joint_position()
+        # Teaching is 100% jogging, so checkpoint the frame after EVERY jog -- otherwise
+        # the saved pose stays stale and the restore-on-connect would set a wrong frame.
+        self._last_joints = (p["X"], p["Y"]); self._last_z = p["Z"]
+        self._save_frame()
+        return p
 
     # The legacy firmware ignores velocity/accel limits and accelerates to a fixed
     # top speed on long moves -- exactly where the steppers lack torque and skip
@@ -683,6 +706,11 @@ class PhilRobot:
             time.sleep(1.0)
         self._pos = {"X": 0.0, "Y": 0.0, "Z": 0.0}
         self.homed = True
+        # The counter is now zero here; checkpoint that so a reconnect restores THIS
+        # zeroed frame, not a stale pre-zero pose.
+        self._last_joints = (0, 0); self._last_z = 0
+        self.frame_suspect = False
+        self._save_frame()
         print(f"home set at current pose; joints now {self.joint_position()}")
 
     # --------------------------------------------------------------- teaching
@@ -796,6 +824,9 @@ class PhilRobot:
                 self.frame_correction = fc
             if "last_x" in d and "last_y" in d:
                 self._last_joints = (int(d["last_x"]), int(d["last_y"]))
+            if "last_z" in d:
+                self._last_z = int(d["last_z"])
+            self._frame_scale = d.get("ustep_scale")
         except Exception:
             pass
 
@@ -805,6 +836,9 @@ class PhilRobot:
         d = dict(self.frame_correction)
         if self._last_joints is not None:
             d["last_x"], d["last_y"] = int(self._last_joints[0]), int(self._last_joints[1])
+        if self._last_z is not None:
+            d["last_z"] = int(self._last_z)
+        d["ustep_scale"] = 256 if self._ustep_scale != 1 else 8   # mark the frame's unit
         if well:
             d["well"] = well.upper()
         if self._anchor_pts:
@@ -928,7 +962,7 @@ class PhilRobot:
             cx, cy = _apply_correction(fc, xm, ym)
             res.append((w, abs(cx - mx) + abs(cy - my)))
         now = self.joint_position()
-        self._last_joints = (now["X"], now["Y"])
+        self._last_joints = (now["X"], now["Y"]); self._last_z = now["Z"]
         self.frame_suspect = False
         self._save_frame(well=",".join(sorted(self._anchor_pts)))
         rs = ", ".join(f"{w}:{e}" for w, e in res)
@@ -981,7 +1015,7 @@ class PhilRobot:
                       "lift — risk of dragging the nozzle across the plate.")
             self._approach_joints(tgt["X"], tgt["Y"])     # creep in like the teach jogs
             self._move_joints_to(z=tgt["Z"])              # set Z
-        self._last_joints = (tgt["X"], tgt["Y"])          # checkpoint for frame-reset detection
+        self._last_joints = (tgt["X"], tgt["Y"]); self._last_z = tgt["Z"]   # frame checkpoint
         self._save_frame(well=well_id)
         return self.joint_position()
 
@@ -1031,7 +1065,7 @@ class PhilRobot:
                       "WITHOUT a lift — risk of hitting the plate wall. Set travel-Z first.")
             self._approach_joints(tgt["X"], tgt["Y"])
             self._move_joints_to(z=tgt["Z"])
-        self._last_joints = (tgt["X"], tgt["Y"])
+        self._last_joints = (tgt["X"], tgt["Y"]); self._last_z = tgt["Z"]
         self._save_frame()
         return self.joint_position()
 

@@ -53,6 +53,7 @@ static const int ACK_JOYSTICK_BUTTON_PRESSED = 14;
 static const int ANALOG_WRITE_ONBOARD_DAC = 15;
 static const int SET_DAC80508_REFDIV_GAIN = 16;
 static const int SET_ILLUMINATION_INTENSITY_FACTOR = 17;
+static const int SET_POSITION = 19;   // p0=axis, p1..p4 = signed int32 microsteps (BE); set counter, no motion
 static const int SET_LIM_SWITCH_POLARITY = 20;
 static const int CONFIGURE_STEPPER_DRIVER = 21;
 static const int SET_MAX_VELOCITY_ACCELERATION = 22;
@@ -894,6 +895,36 @@ void loop() {
             }
             break;
           }
+        case SET_POSITION:
+          {
+            // Set the position COUNTER (XACTUAL) to an absolute value WITHOUT moving:
+            // tmc4361A_setCurrentPosition writes VMAX=0, XACTUAL=value, moveTo(value) so
+            // XTARGET==XACTUAL. Used by the host to restore the open-loop joint frame on
+            // connect (and to align XTARGET before a velocity command). Atomic — does NOT
+            // set *_commanded_movement_in_progress or mcu_cmd_execution_in_progress.
+            int axis = buffer_rx[2];
+            long absolute_position = int32_t(uint32_t(buffer_rx[3]) * 16777216 + uint32_t(buffer_rx[4]) * 65536 + uint32_t(buffer_rx[5]) * 256 + uint32_t(buffer_rx[6]));
+            switch (axis)
+            {
+              case AXIS_X:
+                tmc4361A_setCurrentPosition(&tmc4361[x], absolute_position);
+                X_pos = absolute_position;
+                X_commanded_target_position = absolute_position;
+                break;
+              case AXIS_Y:
+                tmc4361A_setCurrentPosition(&tmc4361[y], absolute_position);
+                Y_pos = absolute_position;
+                Y_commanded_target_position = absolute_position;
+                break;
+              case AXIS_Z:
+                tmc4361A_setCurrentPosition(&tmc4361[z], absolute_position);
+                Z_pos = absolute_position;
+                Z_commanded_target_position = absolute_position;
+                focusPosition = absolute_position;
+                break;
+            }
+            break;
+          }
         case SET_LIM:
           {
             switch (buffer_rx[2])
@@ -1375,6 +1406,7 @@ void loop() {
               mcu_cmd_execution_in_progress = true;
             }
           }
+          break;   // was missing: HOME_OR_ZERO fell through into SET_OFFSET_VELOCITY
         case SET_OFFSET_VELOCITY:
           {
             if (enable_offset_velocity)
