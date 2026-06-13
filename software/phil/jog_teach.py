@@ -20,9 +20,12 @@ Each arrow drives ONE motor by a clean whole step (no rounding):
     q               save and quit
 
 NOTE: the joints are rotary with some backlash, so reversing direction loses a
-little motion. For each well, make your FINAL approach in ONE direction (don't
-wiggle right before Enter) and just get the outlet roughly over the well - it
-does not need to be perfectly centered.
+little motion. ``goto`` always closes in on a well from -X,-Y and finishes with a
++X,+Y creep, so teach each well THE SAME WAY: approach from the lower-left and make
+your FINAL nudges Up and/or Right (don't finish on Down/Left). The console shows
+"approach: +X+Y ok" when you're good; it still records either way but a Down/Left
+finish lands a hair less precisely. The arm auto-approaches each well with that same
++X,+Y motion, so often you only fine-center and press Enter.
 
 It tells you which well to go to. Jog the outlet over it, press Enter, repeat.
 After a few wells it fits the mm<->joint map (from the labware JSON) so you can
@@ -97,13 +100,21 @@ def _read_key():
     return ch
 
 
-def _status(bot, target, step, recorded):
+def _finish_ok(last_dir):
+    """The well must be reached with a +X,+Y (Up/Right) finish so goto, which
+    always creeps +X,+Y, lands the outlet where it was taught. A reversal (the
+    last X or Y nudge was Down/Left) leaves a ~1 backlash-gap offset."""
+    return last_dir is None or (last_dir["X"] != -1 and last_dir["Y"] != -1)
+
+
+def _status(bot, target, step, recorded, last_dir=None):
     j = bot.joint_position()
     tgt = target if target else "(free)"
     done = ",".join(recorded) if recorded else "none"
+    flag = "+X+Y ok " if _finish_ok(last_dir) else "NUDGE Up/Right"
     sys.stdout.write(
         f"\r  TARGET: {tgt:4s} | X={j['X']:+5d} Y={j['Y']:+5d} Z={j['Z']:+5d}"
-        f" | step={step:3d} | done: {done}        "
+        f" | step={step:3d} | approach: {flag} | done: {done}        "
     )
     sys.stdout.flush()
 
@@ -133,7 +144,10 @@ def _approach(bot, target, anchor_mode=False, always=False):
             p = bot.predict_well(target)
         sys.stdout.write(f"  (auto-approaching {target} -> "
                          f"X={p['X']} Y={p['Y']}; nudge then Enter)\n")
-        bot._move_joints_to(x=p["X"], y=p["Y"])
+        # Use goto's coordinated +X,+Y approach so the well is reached the SAME way
+        # goto will replay it: both arms close in together and settle in a +X,+Y
+        # backlash state. The user then only fine-centers, finishing with Up/Right.
+        bot._approach_joints(p["X"], p["Y"])
     except Exception as e:
         sys.stdout.write(f"  (auto-approach skipped: {e})\n")
 
@@ -144,6 +158,9 @@ def main(argv=None):
     anchor_mode = "--anchor" in raw
     all_mode = "--all" in raw
     raw = [a for a in raw if a not in ("--anchor", "--all")]
+    # When specific wells are named (re-teaching a few), auto-drive to each one
+    # like --all does, so you just fine-center instead of jogging there by hand.
+    auto_approach = all_mode or (not anchor_mode and bool(raw))
 
     bot = PhilRobot(backend="legacy")
     bot.connect()
@@ -188,6 +205,9 @@ def main(argv=None):
     step_idx = DEFAULT_STEP_IDX
     gi = 0
     recorded = []
+    # last manual jog direction per axis (+1/-1; 0 = none since the +X,+Y approach).
+    # A taught well must be finished with +X,+Y so goto's +X,+Y creep reproduces it.
+    last_dir = {"X": 0, "Y": 0}
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -195,19 +215,20 @@ def main(argv=None):
         tty.setcbreak(fd)
         target = guide[gi] if gi < len(guide) else None
         _announce(target)
-        _approach(bot, target, anchor_mode, always=all_mode)
-        _status(bot, target, STEPS[step_idx], recorded)
+        _approach(bot, target, anchor_mode, always=auto_approach)
+        last_dir = {"X": 0, "Y": 0}                       # approach ended +X,+Y
+        _status(bot, target, STEPS[step_idx], recorded, last_dir)
         while True:
             step = STEPS[step_idx]
             key = _read_key()
             if key == "UP":
-                bot.jog_joint(dx=step)
+                bot.jog_joint(dx=step); last_dir["X"] = 1
             elif key == "DOWN":
-                bot.jog_joint(dx=-step)
+                bot.jog_joint(dx=-step); last_dir["X"] = -1
             elif key == "RIGHT":
-                bot.jog_joint(dy=step)
+                bot.jog_joint(dy=step); last_dir["Y"] = 1
             elif key == "LEFT":
-                bot.jog_joint(dy=-step)
+                bot.jog_joint(dy=-step); last_dir["Y"] = -1
             elif key == "a":
                 bot.jog_joint(dz=step)
             elif key == "z":
@@ -235,7 +256,13 @@ def main(argv=None):
                         sys.stdout.write("  [all 4 corners captured — press q to fit + save]\n")
                     _announce(target)
                     _approach(bot, target, anchor_mode)
+                    last_dir = {"X": 0, "Y": 0}
                 else:
+                    if not _finish_ok(last_dir):
+                        sys.stdout.write(
+                            "\n  [heads up: last nudge was Down/Left. goto closes in +X,+Y,"
+                            " so finishing with Up/Right lands a bit more precisely next"
+                            " time. Recorded anyway.]")
                     bot.teach_well(target)
                     recorded.append(target)
                     sys.stdout.write(f"\n  [recorded {target}]  {bot.calibration.summary()}\n")
@@ -245,12 +272,14 @@ def main(argv=None):
                         sys.stdout.write("  [all wells done — q to save & quit,"
                                          " or keep teaching with n]\n")
                     _announce(target)
-                    _approach(bot, target, always=all_mode)
+                    _approach(bot, target, always=auto_approach)
+                    last_dir = {"X": 0, "Y": 0}
             elif key == "n":
                 gi += 1
                 target = guide[gi] if gi < len(guide) else None
                 _announce(target)
-                _approach(bot, target, anchor_mode, always=all_mode)
+                _approach(bot, target, anchor_mode, always=auto_approach)
+                last_dir = {"X": 0, "Y": 0}
             elif key == "u":
                 if anchor_mode:
                     if recorded:
@@ -282,7 +311,7 @@ def main(argv=None):
                     sys.stdout.write(f"\n  [saved -> {p}]\n")
             elif key == "q":
                 break
-            _status(bot, target, STEPS[step_idx], recorded)
+            _status(bot, target, STEPS[step_idx], recorded, last_dir)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         if anchor_mode:

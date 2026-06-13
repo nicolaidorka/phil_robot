@@ -14,6 +14,7 @@ Run from the ``software/`` directory:
     python -m phil.selftest --move          # also do a small bounded joint jog
     python -m phil.selftest --move --axis Y --usteps 16
     python -m phil.selftest --simulate --move
+    python -m phil.selftest --backlash --axis X   # size the goto approach back-off
 """
 from __future__ import annotations
 
@@ -65,9 +66,49 @@ def raw_feedback_probe(device, baud=2000000, msg_len=LEGACY_MSG_LEN, n=40):
         s.close()
 
 
+def measure_backlash(bot, axis, sizes=(8, 16, 24, 32, 40), step=8):
+    """Semi-automated reversal-gap check (no encoders -> the human is the sensor).
+
+    For each candidate back-off ``t``, run a closed round trip on one axis from the
+    current reference: move ``-t``, then creep ``+t`` back to the start count, and
+    ask whether the outlet returned to where it started. The smallest ``t`` that
+    reproduces the position is the reversal gap; ``goto``'s APPROACH_PRE_USTEPS must
+    exceed it so the +X,+Y creep reliably takes up slack on every well. Each test is
+    count-neutral (returns to the start count), so the reference is preserved.
+    """
+    jk = f"d{axis.lower()}"
+    print(f"\n== Backlash / approach back-off check on {axis} ==")
+    print(f"   Jog the outlet onto a well and center it, then press Enter.")
+    input()
+    c0 = bot.joint_position()[axis]
+    recommended = None
+    for t in sizes:
+        bot.jog_joint(**{jk: -t})                       # reverse off the reference
+        time.sleep(0.2)
+        d = t                                           # creep + back to the start count
+        while d > 0:
+            s = min(step, d); bot.jog_joint(**{jk: s}); time.sleep(0.05); d -= s
+        cur = bot.joint_position()[axis]
+        ans = input(f"   back-off {t:3d} usteps: did the outlet return to the start "
+                    f"(count {cur}, want {c0})? [y/N] ").strip().lower()
+        if ans == "y" and recommended is None:
+            recommended = t
+    if recommended is None:
+        print("   none of the tested back-offs reproduced the position cleanly; try "
+              "larger sizes or check the mechanics.")
+    else:
+        margin = recommended + step
+        print(f"   -> reversal gap ~{recommended} usteps. Set APPROACH_PRE_USTEPS >= "
+              f"{margin} (gap + one step). Current default is "
+              f"{bot.APPROACH_PRE_USTEPS}.")
+    return recommended
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Phil arm hardware self-test")
     ap.add_argument("--move", action="store_true", help="perform a small bounded jog")
+    ap.add_argument("--backlash", action="store_true",
+                    help="measure the reversal gap to size the goto approach back-off")
     ap.add_argument("--axis", default="X", choices=["X", "Y", "Z"])
     ap.add_argument("--usteps", type=int, default=16, help="jog size in repo usteps (small!)")
     ap.add_argument("--simulate", action="store_true")
@@ -106,6 +147,9 @@ def main(argv=None):
         print(f"   jogged back; residual from start on {ax} = {end - before:+d} usteps")
         print("   -> joint motion + feedback: PASS" if abs(moved - before) > 0 else
               "   -> no motion detected: CHECK")
+
+    if args.backlash:
+        measure_backlash(bot, args.axis)
 
     bot.close()
     print("\nself-test complete.")

@@ -64,6 +64,16 @@ def _is_identity(fc):
             and fc["d"] == 0.0 and fc["e"] == 1.0 and fc["cy"] == 0.0)
 
 
+def _is_translation_only(fc):
+    """True if the correction is a pure (cx,cy) shift with an identity linear part.
+
+    reanchor() / a 1-2 point fit produce this (power-cycle / bump recovery): a
+    rigid shift of the whole joint frame. ``anchor fit`` (>=3 points) produces a
+    full affine whose (cx,cy) intercept is NOT a standalone translation.
+    """
+    return fc["a"] == 1.0 and fc["b"] == 0.0 and fc["d"] == 0.0 and fc["e"] == 1.0
+
+
 def _apply_correction(fc, xm, ym):
     return (int(round(fc["a"] * xm + fc["b"] * ym + fc["cx"])),
             int(round(fc["d"] * xm + fc["e"] * ym + fc["cy"])))
@@ -99,9 +109,13 @@ class SimulatedBackend:
     def move_x_to_usteps(self, u): self.x_pos = u
     def move_y_to_usteps(self, u): self.y_pos = u
     def move_z_to_usteps(self, u): self.z_pos = u
-    def move_x_usteps(self, u): self.x_pos += C.STAGE_MOVEMENT_SIGN_X * u
-    def move_y_usteps(self, u): self.y_pos += C.STAGE_MOVEMENT_SIGN_Y * u
-    def move_z_usteps(self, u): self.z_pos += C.STAGE_MOVEMENT_SIGN_Z * u
+    # Relative jogs raise the reported count for a + value, matching the legacy
+    # firmware/teach convention (Up arrow = +dx records an increasing X). This
+    # MUST agree with the absolute moves above so the interleaved approach
+    # (absolute pre-position + relative creep) converges on the sim too.
+    def move_x_usteps(self, u): self.x_pos += u
+    def move_y_usteps(self, u): self.y_pos += u
+    def move_z_usteps(self, u): self.z_pos += u
     def home_x(self): self.x_pos = 0
     def home_y(self): self.y_pos = 0
     def home_z(self): self.z_pos = 0
@@ -281,6 +295,28 @@ class PhilRobot:
     def _wait(self):
         self.mc.wait_till_operation_is_completed(self.move_timeout_s)
 
+    def _confirm_joints(self, x=None, y=None, tol=None, timeout=None):
+        """Poll the live joints until the commanded axes actually reach target.
+
+        The legacy firmware only reports completion for the LAST command sent, so
+        after a two-axis move ``_wait`` can return while the longer-travel axis is
+        still moving (`legacy_mc.py` clears the busy flag on the latest cmd_id).
+        This re-reads the reported counts and waits until both are within ``tol``.
+        Returns True on arrival, False on timeout.
+        """
+        tol = self.APPROACH_CONFIRM_TOL if tol is None else tol
+        timeout = self.APPROACH_CONFIRM_TIMEOUT if timeout is None else timeout
+        t0 = time.time()
+        while True:
+            j = self.joint_position()
+            okx = x is None or abs(j["X"] - int(x)) <= tol
+            oky = y is None or abs(j["Y"] - int(y)) <= tol
+            if okx and oky:
+                return True
+            if time.time() - t0 >= timeout:
+                return False
+            time.sleep(0.02)
+
     # --------------------------------------------------------------- homing
     def home(self, z_lift_mm: float = 1.0):
         """Full homing: Z first (then lift), then both arms, then zero.
@@ -416,19 +452,74 @@ class PhilRobot:
             self.mc.move_z_usteps(int(dz)); self._wait()
         return self.joint_position()
 
+    # The legacy firmware ignores velocity/accel limits and accelerates to a fixed
+    # top speed on long moves -- exactly where the steppers lack torque and skip
+    # steps (silent drift, since there are no encoders). We can't slow it directly,
+    # but a SHORT move never reaches that top speed. So break every XY traverse into
+    # legs of at most this many usteps: the arm stays in the low-speed accel/decel
+    # band the whole way. Smaller = safer but slower.
+    MOVE_CHUNK_USTEPS = 40
+
     def _move_joints_to(self, x=None, y=None, z=None, coordinated=True):
-        """Absolute joint move in usteps. coordinated=True moves X and Y together."""
+        """Absolute joint move in usteps, broken into short coordinated legs so the
+        fixed-profile firmware never reaches the high speed where it loses steps."""
         self._require()
-        if x is not None:
-            self.mc.move_x_to_usteps(int(x))
-            if not coordinated:
-                self._wait()
-        if y is not None:
-            self.mc.move_y_to_usteps(int(y))
         if x is not None or y is not None:
-            self._wait()
+            cur = self.joint_position()
+            tx = int(x) if x is not None else cur["X"]
+            ty = int(y) if y is not None else cur["Y"]
+            x0, y0 = cur["X"], cur["Y"]
+            dist = max(abs(tx - x0), abs(ty - y0))
+            legs = max(1, -(-dist // self.MOVE_CHUNK_USTEPS))   # ceil division
+            for i in range(1, legs + 1):
+                ix = int(round(x0 + (tx - x0) * i / legs))
+                iy = int(round(y0 + (ty - y0) * i / legs))
+                self.mc.move_x_to_usteps(ix)
+                self.mc.move_y_to_usteps(iy)
+                self._wait()
+            self._confirm_joints(x=tx, y=ty)            # both arms truly arrived
         if z is not None:
             self.mc.move_z_to_usteps(int(z)); self._wait()
+
+    # Final-approach tuning. Teaching reaches a well with small RELATIVE +X/+Y jogs
+    # (Up/Right arrows); goto must finish the SAME way so the open-loop joints
+    # settle in the same backlash state for the same count. The approach advances
+    # the two arms TOGETHER (alternating small steps) so the outlet closes in along
+    # a coordinated diagonal instead of an L-shaped single-joint swing that strains
+    # the 5-bar linkage. (The legacy firmware has a fixed motion profile and ignores
+    # velocity/accel, so coordination is by interleaved path, not by speed.)
+    # Run-up distance for the final approach. The arm must arrive with MOMENTUM so
+    # it lands in the repeatable kinetic-friction regime; a short creep stops inside
+    # the static-friction (stiction) band and settles at a random point -> the
+    # different-direction-each-time error on close well-to-well moves. So the final
+    # leg is ONE continuous move this long (NOT chunked), big enough to build
+    # momentum but short enough to stay under the step-loss speed. Approaching from
+    # -X,-Y also fixes the backlash direction (must exceed the backlash gap too).
+    APPROACH_PRE_USTEPS = 80
+    # The firmware commands in whole full-steps (8 repo-usteps) and reports the
+    # position quantized to that grid, so a commanded count can read back up to ~4
+    # usteps off. Confirm within one full-step, and never block long: this is a
+    # best-effort settle check on top of _wait(), not a hard gate.
+    APPROACH_CONFIRM_TOL = 8      # usteps; both axes within this of target = arrived
+    APPROACH_CONFIRM_TIMEOUT = 2.0  # seconds; give up and proceed (don't freeze)
+
+    def _approach_joints(self, x, y):
+        """Reach (x,y) with a momentum run-up from -X,-Y.
+
+        Two parts, treated differently on purpose:
+          * the traverse to the run-up start is CHUNKED (short legs) so the firmware
+            never hits the high speed where it loses steps;
+          * the final leg into the well is ONE continuous coordinated MOVETO (NOT
+            chunked) so the arm carries momentum through stiction and lands the same
+            every time -- this is why a long direct move repeats better than creeping
+            neighbor-to-neighbor. It also closes in +X,+Y (consistent backlash)."""
+        x, y = int(x), int(y)
+        pre = self.APPROACH_PRE_USTEPS
+        self._move_joints_to(x=x - pre, y=y - pre)       # chunked traverse to run-up start
+        self.mc.move_x_to_usteps(x)                      # final run-up: one continuous move
+        self.mc.move_y_to_usteps(y)
+        self._wait()
+        self._confirm_joints(x=x, y=y)                   # both arms truly arrived
 
     # ------------------------------------------------------------- home/zero
     def set_home(self):
@@ -498,13 +589,23 @@ class PhilRobot:
     def _resolve_well(self, well_id: str):
         """Joint target: exact taught > 5-bar kinematics > RBF curve-fit > affine.
 
-        The persisted joint-frame correction (from reanchor/anchor) is applied so
-        the permanent geometry calibration survives a controller power-cycle.
+        The persisted joint-frame correction (from reanchor/anchor) has two roles
+        that apply to different wells:
+
+          * a pure translation (reanchor / power-cycle recovery) is a rigid shift
+            of the whole joint frame -> applied to EVERY well, taught included, so
+            the calibration survives a controller power-cycle.
+          * a full ``anchor fit`` affine (scale/shear, edge refinement of the 5-bar
+            model) is applied ONLY to model-derived (untaught) wells. A taught well
+            is measured ground truth -- exact replay -- and must never be distorted
+            by the model's edge-refinement affine.
         """
         tgt, src = self._resolve_raw(well_id)
         fc = self.frame_correction
         if _is_identity(fc):
             return tgt, src                      # exact pass-through (byte-identical)
+        if src == "taught" and not _is_translation_only(fc):
+            return tgt, src                      # don't apply the edge affine to truth
         x, y = _apply_correction(fc, tgt["X"], tgt["Y"])
         return {**tgt, "X": x, "Y": y}, src
 
@@ -724,10 +825,10 @@ class PhilRobot:
         print(f"goto {well_id.upper()} [{taught}] -> X={tgt['X']} Y={tgt['Y']} Z={tgt['Z']}")
         if travel_z is not None and self.teach_table.z_travel_usteps is not None:
             self._move_joints_to(z=travel_z)              # lift to safe travel height
-            self._move_joints_to(x=tgt["X"], y=tgt["Y"])  # swing arms together
+            self._approach_joints(tgt["X"], tgt["Y"])     # creep in like the teach jogs
             self._move_joints_to(z=tgt["Z"])              # descend to the well
         else:
-            self._move_joints_to(x=tgt["X"], y=tgt["Y"])  # coordinated XY
+            self._approach_joints(tgt["X"], tgt["Y"])     # creep in like the teach jogs
             self._move_joints_to(z=tgt["Z"])              # set Z
         self._last_joints = (tgt["X"], tgt["Y"])          # checkpoint for frame-reset detection
         self._save_frame(well=well_id)
