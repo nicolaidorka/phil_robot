@@ -4,6 +4,12 @@ Active execution log for the microstep reflash (companion to the background/plan
 in [FUTURE-microstep-reflash.md](FUTURE-microstep-reflash.md)). Everything here is
 committed so it survives sessions and machines. **Decision: GO** (2026-06-12).
 
+> **FLASHED + WORKING (2026-06-13).** Motors jog, frame persists across reconnects &
+> power-cycles. The hard-won firmware/driver gotchas (INITIALIZE needed for movement,
+> the SET_POSITION velocity-mode trap, frame restore) are in
+> **[V2-FIRMWARE-NOTES.md](V2-FIRMWARE-NOTES.md)** — read that before touching v2.
+> Now: clean-teach the 96-well boundary for precise well-hitting.
+
 ## Why we're doing it (one paragraph)
 Phil's positioning is coarse because the *current custom firmware only accepts
 whole full-step move commands*. On this 5-bar arm one full-step swings the tip
