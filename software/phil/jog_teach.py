@@ -181,8 +181,12 @@ def main(argv=None):
     # the jog increments to keep the same physical nudge sizes, and STAMP the teach
     # table as v2-scale so goto will accept the freshly-taught data.
     if bot._ustep_scale != 1:
-        global STEPS
-        STEPS = [s * bot._ustep_scale for s in STEPS]
+        global STEPS, DEFAULT_STEP_IDX
+        # v2 commands in microsteps, so offer FINE jog steps for centering. The legacy
+        # list was full-step-limited (~1 mm minimum) -- too coarse for a well. At
+        # ~227 microsteps/mm at the tip: 8 ~ 0.035 mm (fine center) ... 2048 ~ 9 mm (travel).
+        STEPS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+        DEFAULT_STEP_IDX = 6      # 512 ~ 2.3 mm to travel; press '-' for fine centering
         bot.teach_table.ustep_scale = 256
     bot.connect()
 
