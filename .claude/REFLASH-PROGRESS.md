@@ -84,7 +84,9 @@ MUST FIX before flashing:
       so deferred; set MICROSTEPPING_*=256 if/when the mm helpers are used on v2. (OPEN, low priority)
 
 ROLLBACK FIRMWARE — can we get the current custom firmware back? (searched 2026-06-12)
-- NOT on this machine (no matching .hex; no source with the legacy 6-byte/20-byte protocol).
+- EXHAUSTIVELY confirmed NOT on this machine (2026-06-12): swept whole FS for octopi firmware
+  (TMC4361/MOVETO) — only the restored v2 exists; no 6-byte/20-byte source or .hex; git dangling/stash
+  clean; other .ino on disk are unrelated (stepper test sketches, a separate Fluidics Teensy device).
 - NEVER committed to this repo (git history only ever had octopi_firmware_v2 = the 8-byte protocol).
 - A Teensy 4.x flash CANNOT be read back → the running firmware is unrecoverable from the chip.
 - Upstream octopi-research is 8-byte (= our v2); the 6-byte custom build matches no upstream release.
