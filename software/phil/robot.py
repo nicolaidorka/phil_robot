@@ -210,11 +210,13 @@ class PhilRobot:
             # (32x too small) -> wrong moves. If the loaded teach table isn't marked
             # v2-scale (ustep_scale==256), DROP it (and the legacy fit) so goto can't
             # replay stale data; a fresh `jog_teach --v2 --all` re-teach is required.
-            if self.teach_table.taught and (self.teach_table.ustep_scale or 8) != 256:
+            if ((self.teach_table.taught or self.teach_table.named)
+                    and (self.teach_table.ustep_scale or 8) != 256):
                 print("** v2: on-disk teach/kinematics data is LEGACY-scale -> ignored. "
                       "Re-teach on v2:  python3 -m phil.jog_teach --v2 --all  "
                       "(goto is disabled until then).")
                 self.teach_table.taught = {}
+                self.teach_table.named = {}
                 self.teach_table.ustep_scale = 256
                 self.kin_model = None
                 self.well_map = None
@@ -959,6 +961,53 @@ class PhilRobot:
             self._move_joints_to(z=tgt["Z"])              # set Z
         self._last_joints = (tgt["X"], tgt["Y"])          # checkpoint for frame-reset detection
         self._save_frame(well=well_id)
+        return self.joint_position()
+
+    # --------------------------------------------- named (off-plate) positions
+    def teach_position(self, name: str):
+        """Save the current joints as a NAMED off-plate position (e.g. WASTE, PARK).
+
+        Jog the outlet to the spot (lift over the plate wall, swing to the side over
+        the waste container, set the dispense height), then call this. ``goto_position``
+        replays it with the same lift -> traverse -> descend motion as a well."""
+        self._require()
+        p = self.joint_position()
+        self.teach_table.teach_named(name, p["X"], p["Y"], p["Z"])
+        print(f"taught position {name.strip().upper()} @ joints "
+              f"X={p['X']} Y={p['Y']} Z={p['Z']}")
+        return p
+
+    def goto_position(self, name: str, safe=True):
+        """Move to a taught named position (e.g. WASTE): lift Z, traverse X/Y, descend.
+
+        Same motion as goto_well. Named positions are taught ground truth, so a pure
+        reanchor translation is applied (to survive a power-cycle) but never the edge
+        affine -- they are replayed as recorded."""
+        self._require()
+        nm = name.strip().upper()
+        if not self.teach_table.is_named(nm):
+            have = ", ".join(sorted(self.teach_table.named)) or "none"
+            raise KeyError(f"no named position '{nm}' (teach it with "
+                           f"teach_position). Known: {have}")
+        if self.frame_suspect:
+            print("  ** frame looks power-cycle-reset — `reanchor` first or this "
+                  "move will be off.")
+        tgt = self.teach_table.joint_for_named(nm)
+        fc = self.frame_correction
+        if not _is_identity(fc) and _is_translation_only(fc):
+            x, y = _apply_correction(fc, tgt["X"], tgt["Y"])
+            tgt = {**tgt, "X": x, "Y": y}
+        travel_z = self.teach_table.travel_z() if safe else None
+        print(f"goto position {nm} -> X={tgt['X']} Y={tgt['Y']} Z={tgt['Z']}")
+        if travel_z is not None and self.teach_table.z_travel_usteps is not None:
+            self._move_joints_to(z=travel_z)              # lift to safe travel height
+            self._approach_joints(tgt["X"], tgt["Y"])     # traverse + close in
+            self._move_joints_to(z=tgt["Z"])              # descend to dispense height
+        else:
+            self._approach_joints(tgt["X"], tgt["Y"])
+            self._move_joints_to(z=tgt["Z"])
+        self._last_joints = (tgt["X"], tgt["Y"])
+        self._save_frame()
         return self.joint_position()
 
     def scan_wells(self, well_ids, dwell_s=0.0):

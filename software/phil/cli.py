@@ -19,6 +19,9 @@ Commands:
     teach <well>                 save current joints as <well> (e.g. teach A1)
     forget <well>                remove a taught well
     goto <well>                  move to a well (coordinated arms, then Z)
+    teachpos <name>              save current joints as an off-plate spot (e.g. teachpos WASTE)
+    gotopos <name>              move to a named spot (lift -> traverse -> descend, e.g. gotopos WASTE)
+    forgetpos <name>            remove a named position
     wellpos <well>               show where a well resolves to (no move)
     travelz [usteps]             set a safe lift height for between-well travel
     scan <w1> <w2> ...           visit several wells in order
@@ -78,6 +81,14 @@ class PhilShell:
             elif cmd == "goto":
                 bot.goto_well(args[0])
                 print("  arrived:", _jfmt(bot.joint_position()))
+            elif cmd == "teachpos":
+                bot.teach_position(args[0])           # save an off-plate spot (e.g. WASTE)
+            elif cmd == "gotopos":
+                bot.goto_position(args[0])            # lift -> traverse -> descend to it
+                print("  arrived:", _jfmt(bot.joint_position()))
+            elif cmd == "forgetpos":
+                bot.teach_table.forget_named(args[0])
+                print(f"forgot position {args[0].upper()}")
             elif cmd == "wellpos":
                 print(_jfmt(bot.well_position(args[0])))
             elif cmd == "travelz":

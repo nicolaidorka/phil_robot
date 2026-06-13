@@ -34,6 +34,7 @@ class TeachTable:
                  z_travel_usteps=None, ustep_scale=None):
         self.labware = labware
         self.taught: dict[str, dict] = {}        # well -> {'X':int,'Y':int,'Z':int}
+        self.named: dict[str, dict] = {}         # off-plate positions (WASTE, PARK, ...)
         self.z_travel_usteps = z_travel_usteps   # absolute travel Z (firmware usteps)
         # Marks the joint-count unit the data was taught in: None/8 = legacy
         # full-step firmware, 256 = v2 microstep firmware. goto refuses to replay
@@ -50,6 +51,21 @@ class TeachTable:
 
     def is_taught(self, well_id) -> bool:
         return well_id.strip().upper() in self.taught
+
+    # --------------------------------------------- named (off-plate) positions
+    def teach_named(self, name, x, y, z):
+        """Save a NAMED off-plate position (e.g. WASTE, PARK) in joint usteps."""
+        self.named[name.strip().upper()] = {
+            "X": int(round(x)), "Y": int(round(y)), "Z": int(round(z))}
+
+    def forget_named(self, name):
+        self.named.pop(name.strip().upper(), None)
+
+    def is_named(self, name) -> bool:
+        return name.strip().upper() in self.named
+
+    def joint_for_named(self, name) -> dict:
+        return dict(self.named[name.strip().upper()])
 
     def corners_present(self, plate=None) -> bool:
         corners = plate_corners(plate) if plate is not None else CORNERS
@@ -93,7 +109,8 @@ class TeachTable:
         return {"labware": self.labware,
                 "z_travel_usteps": self.z_travel_usteps,
                 "ustep_scale": self.ustep_scale,
-                "taught": self.taught}
+                "taught": self.taught,
+                "named": self.named}
 
     def save(self, path=None) -> str:
         path = path or DEFAULT_TEACH_PATH
@@ -113,13 +130,16 @@ class TeachTable:
                 z_travel_usteps=d.get("z_travel_usteps"),
                 ustep_scale=d.get("ustep_scale"))
         t.taught = {k.upper(): v for k, v in d.get("taught", {}).items()}
+        t.named = {k.upper(): v for k, v in d.get("named", {}).items()}
         return t
 
     def summary(self) -> str:
         n = len(self.taught)
+        named = (f"; named: {', '.join(sorted(self.named))}" if self.named else "")
         if n == 0:
-            return "teach table: EMPTY (jog to wells and `teach <well>`)"
+            return ("teach table: EMPTY (jog to wells and `teach <well>`)" if not self.named
+                    else f"teach table: 0 wells taught{named}")
         corners = "corners OK" if self.corners_present() else "corners INCOMPLETE"
         tz = self.travel_z()
         return (f"teach table: {n} well(s) taught [{', '.join(sorted(self.taught))}]; "
-                f"{corners}; travel Z={'auto' if self.z_travel_usteps is None else tz}")
+                f"{corners}; travel Z={'auto' if self.z_travel_usteps is None else tz}{named}")
