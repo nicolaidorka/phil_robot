@@ -307,15 +307,20 @@ class PhilRobot:
         tol = self.APPROACH_CONFIRM_TOL if tol is None else tol
         timeout = self.APPROACH_CONFIRM_TIMEOUT if timeout is None else timeout
         t0 = time.time()
+        hits = 0
         while True:
             j = self.joint_position()
             okx = x is None or abs(j["X"] - int(x)) <= tol
             oky = y is None or abs(j["Y"] - int(y)) <= tol
             if okx and oky:
-                return True
+                hits += 1
+                if hits >= 3:        # require the reading to HOLD: a single
+                    return True      # in-tol read can be stale/mid-move (the
+            else:                    # firmware reports the last cmd, not motion)
+                hits = 0
             if time.time() - t0 >= timeout:
-                return False
-            time.sleep(0.02)
+                return hits > 0      # close enough if we ever saw target, else timeout
+            time.sleep(0.03)
 
     # --------------------------------------------------------------- homing
     def home(self, z_lift_mm: float = 1.0):
@@ -477,7 +482,11 @@ class PhilRobot:
                 self.mc.move_x_to_usteps(ix)
                 self.mc.move_y_to_usteps(iy)
                 self._wait()
-            self._confirm_joints(x=tx, y=ty)            # both arms truly arrived
+                # Confirm EACH leg lands before sending the next. The legacy driver
+                # only ACKs the last command, so without this the legs pile up into
+                # one fast move (defeating the speed limit) or get cut short -- the
+                # accepted-slop-seeds-the-next-move drift that grows over a session.
+                self._confirm_joints(x=ix, y=iy)
         if z is not None:
             self.mc.move_z_to_usteps(int(z)); self._wait()
 
@@ -502,24 +511,58 @@ class PhilRobot:
     # best-effort settle check on top of _wait(), not a hard gate.
     APPROACH_CONFIRM_TOL = 8      # usteps; both axes within this of target = arrived
     APPROACH_CONFIRM_TIMEOUT = 2.0  # seconds; give up and proceed (don't freeze)
+    APPROACH_OK_USTEPS = 8        # accept within one full-step: the firmware commands on an
+                                  # 8-ustep grid, so it CANNOT deliberately stop tighter
+    APPROACH_MAX_ITERS = 6        # closed-loop correction passes (noisy poses need more)
+    APPROACH_MAX_CORRECTION = 30  # guard: a bigger "error" is a bad read, don't chase it
+    APPROACH_DAMPING = 0.5        # near target, apply only this fraction (filter read noise)
+    APPROACH_READS = 5            # median this many reads -> reject mid-move/stale samples
 
-    def _approach_joints(self, x, y):
-        """Reach (x,y) with a momentum run-up from -X,-Y.
+    def _read_joints_settled(self, n=None, dt=0.02):
+        """Median of several position reads. The reader thread hands back whatever
+        packet arrived last (sometimes mid-move or stale), so one read is noisy; the
+        median of a short burst is the stable position."""
+        n = self.APPROACH_READS if n is None else n
+        xs, ys = [], []
+        for _ in range(n):
+            j = self.joint_position(); xs.append(j["X"]); ys.append(j["Y"]); time.sleep(dt)
+        xs.sort(); ys.sort()
+        return xs[n // 2], ys[n // 2]
 
-        Two parts, treated differently on purpose:
-          * the traverse to the run-up start is CHUNKED (short legs) so the firmware
-            never hits the high speed where it loses steps;
-          * the final leg into the well is ONE continuous coordinated MOVETO (NOT
-            chunked) so the arm carries momentum through stiction and lands the same
-            every time -- this is why a long direct move repeats better than creeping
-            neighbor-to-neighbor. It also closes in +X,+Y (consistent backlash)."""
+    def _approach_joints(self, x, y, approach=(1, 1)):
+        """Approach (x,y) from a fixed direction, then CLOSED-LOOP correct on the
+        position readout.
+
+        ``approach`` is the per-axis sign: +1 = come from the -side and close in +;
+        -1 = come from the +side and close in -. Default (+1,+1) is the canonical
+        -X,-Y -> +X,+Y close-in. A per-well override matches how a well was taught,
+        closing the count-vs-physical backlash gap that leaves some wells (e.g. E12)
+        a fixed amount off even when the count reads on-target.
+
+        The firmware overshoots the commanded count by a small repeatable amount, so
+        each pass reads the MEDIAN residual vs the true target and re-commands to
+        cancel it. Hard-won details: the accept band is one full-step (8) because the
+        firmware can't command finer; a big error gets the full correction while near
+        target it's damped (so it neither chases noise nor rounds to a no-op); and a
+        >MAX_CORRECTION 'error' is a bad read and is ignored so it can't fling the arm."""
         x, y = int(x), int(y)
+        sx, sy = approach
         pre = self.APPROACH_PRE_USTEPS
-        self._move_joints_to(x=x - pre, y=y - pre)       # chunked traverse to run-up start
-        self.mc.move_x_to_usteps(x)                      # final run-up: one continuous move
-        self.mc.move_y_to_usteps(y)
-        self._wait()
-        self._confirm_joints(x=x, y=y)                   # both arms truly arrived
+        cx, cy = x, y
+        for _ in range(self.APPROACH_MAX_ITERS):
+            self._move_joints_to(x=cx - sx * pre, y=cy - sy * pre)  # pre-position on matching side
+            self.mc.move_x_to_usteps(cx)                            # close in along taught direction
+            self.mc.move_y_to_usteps(cy)
+            self._wait()
+            self._confirm_joints(x=cx, y=cy)
+            mx, my = self._read_joints_settled()                    # median read (reject noise)
+            ex, ey = x - mx, y - my                                 # residual vs the TRUE target
+            if abs(ex) <= self.APPROACH_OK_USTEPS and abs(ey) <= self.APPROACH_OK_USTEPS:
+                break
+            if abs(ex) > self.APPROACH_MAX_CORRECTION or abs(ey) > self.APPROACH_MAX_CORRECTION:
+                break                                               # implausible read -> trust move
+            a = 1.0 if (abs(ex) > 16 or abs(ey) > 16) else self.APPROACH_DAMPING
+            cx += int(round(a * ex)); cy += int(round(a * ey))
 
     # ------------------------------------------------------------- home/zero
     def set_home(self):
