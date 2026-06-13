@@ -31,6 +31,18 @@ static const int FULLSTEPS_PER_REV_THETA = 200;
 static const float R_sense_xy = 0.22;
 static const float R_sense_z = 0.43;
 
+// Axis index -> TMC channel. These decide WHICH motor a MOVE_X/Y/Z command drives.
+// Values copied from def_octopi.h (this same V4 board). NOTE x and y are swapped
+// (x=1, y=0) per the octopi board layout. *** BRING-UP: first jog X a few steps and
+// confirm the intended (left) arm moves; if the wrong arm moves, swap x/y here. ***
+static const uint8_t x = 1;
+static const uint8_t y = 0;
+static const uint8_t z = 2;
+
+// Limit-switch polarity flags (homing is not used on Phil at bring-up; values from def_octopi.h).
+static const bool flip_limit_switch_x = true;
+static const bool flip_limit_switch_y = false;
+
 // Notional pitch (see header note). Kept = platereader so step math is sane.
 float SCREW_PITCH_X_MM = 4;
 float SCREW_PITCH_Y_MM = 4;

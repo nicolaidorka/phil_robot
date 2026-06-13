@@ -77,8 +77,19 @@ MUST FIX before flashing:
       ×scale; inline noise gate → `2*APPROACH_OK_USTEPS`; `_MAX_SPAN_USTEPS * self._ustep_scale` at use-site.
       Verified by import: v2 → CHUNK 1280, TOL/OK 256, MAXCORR 960, FRAME 2560; legacy/sim unchanged.
 - [x] **jog_teach** takes `--v2` (builds backend=v2) and scales STEPS by `bot._ustep_scale` for re-teaching.
-- [ ] **Toolchain**: FastLED + PacketSerial libs not installed; needed to compile (PacketSerial is included
-      unconditionally even with joystick off). Install, then COMPILE .hex without flashing to prove it builds. (OPEN)
+- [x] **Toolchain + COMPILE DONE (2026-06-12).** Installed arduino-cli 1.5.1 (~/bin), teensy:avr@1.61.0 core,
+      FastLED + PacketSerial libs. **def_phil.h COMPILES CLEAN for Teensy 4.1** (FLASH code 38640 B, tons free).
+      Build cmd: `PATH=~/bin:$PATH arduino-cli compile --fqbn teensy:avr:teensy41 --output-dir firmware/build \
+      firmware/octopi_firmware_v2/main_controller_teensy41`. Artifact: firmware/build/main_controller_teensy41.ino.hex (152K).
+      Compile surfaced + FIXED two more def_phil.h gaps (configs were never built standalone): added axis indices
+      x/y/z and flip_limit_switch_x/y (copied from def_octopi.h, same V4 board).
+- [ ] **FLASH prereq — udev rule** (for non-root Teensy access): `sudo cp` PJRC 00-teensy.rules to
+      /etc/udev/rules.d/ (compile warned it's missing). Only needed to flash, not to build.
+
+AXIS MAPPING CAVEAT (bring-up): def_phil.h uses def_octopi's x=1, y=0, z=2 (X and Y SWAPPED per the board
+layout). This decides which motor a MOVE_X/Y/Z drives. FIRST bring-up step: jog X a few steps, confirm the
+intended arm moves; if wrong, swap x/y in def_phil.h and recompile. (Re-teach happens on v2 regardless, so
+either mapping ends up self-consistent — but get it right so X/Y labels match the physical arms.)
 - [ ] **mm-convenience path** (constants.MICROSTEPPING_*=8) is NOT yet 256: read_position()/move_to(mm)/soft
       limits read 32x off on v2. NOT in the goto/teach critical path (those are count-based via the teach table),
       so deferred; set MICROSTEPPING_*=256 if/when the mm helpers are used on v2. (OPEN, low priority)

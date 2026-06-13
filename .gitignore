@@ -10,3 +10,4 @@ software/phil/config/phil_frame.json
 build/
 dist/
 __pycache__/
+firmware/build/
