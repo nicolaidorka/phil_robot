@@ -24,6 +24,13 @@ static const int FULLSTEPS_PER_REV_Y = 200;
 static const int FULLSTEPS_PER_REV_Z = 200;
 static const int FULLSTEPS_PER_REV_THETA = 200;
 
+// Sense resistors for the TMC2660 current calc (.ino uses R_sense_xy / R_sense_z).
+// Standard Squid/octopi V4 values (from def_octopi.h). VERIFY against this board's
+// actual R_sense before flashing -- if different, the real motor current scales
+// inversely (smaller R_sense => higher current).
+static const float R_sense_xy = 0.22;
+static const float R_sense_z = 0.43;
+
 // Notional pitch (see header note). Kept = platereader so step math is sane.
 float SCREW_PITCH_X_MM = 4;
 float SCREW_PITCH_Y_MM = 4;

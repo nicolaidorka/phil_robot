@@ -210,8 +210,10 @@ class V2Microcontroller:
         return
 
     def set_axis_enable_disable(self, axis, status):
-        # SET_AXIS_DISABLE_ENABLE: payload [axis, status]; status 1=disable,0=enable
-        # (matches stock squid). Used by home_arms to home one motor at a time.
+        # SET_AXIS_DISABLE_ENABLE: payload [axis, status]. FIRMWARE polarity:
+        # status==0 -> DISABLE driver, status!=0 -> ENABLE. (transparent pass-through.)
+        # WARNING: robot.py home_arms() was written for the OPPOSITE convention and
+        # would disable the wrong arm -- fix home_arms polarity before any v2 homing.
         self._send(SET_AXIS_DISABLE_ENABLE, axis, status)
 
     def close(self):

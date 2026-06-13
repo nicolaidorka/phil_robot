@@ -61,6 +61,36 @@ only the joystick on Serial5). Fixed frames, no delimiter:
 - [ ] Bring-up: zero via HOME_OR_ZERO_ZERO (no homing); tiny one-axis move; confirm
       direction/scale; **watch motor temperature**; then re-teach + re-fit + verify.
 
+## Agent review findings (2026-06-12) — 3 reviewers: driver / config / integration
+FIXED in this state:
+- [x] **Compile blocker**: def_phil.h was missing `R_sense_xy`/`R_sense_z` (firmware current calc
+      needs them). Added standard Squid V4 values 0.22 / 0.43 — VERIFY against the board before flash.
+- [x] **Polarity comment bug**: v2_mc.py `set_axis_enable_disable` comment had enable/disable backwards.
+      Firmware truth: status==0 disables, !=0 enables. Comment corrected; behavior is transparent pass-through.
+
+MUST FIX before flashing (still open — all in the TODO):
+- [ ] **`.ino` include still selects `def_octopi_80120.h`** (line 9), NOT def_phil.h. Flashing as-is would
+      load the wrong stage's current/joystick. Comment line 9, add `#include "def_phil.h"`. (CRITICAL)
+- [ ] **backend="v2" not wired** in robot.py — it currently falls through to the stock Qt driver. Add an
+      `elif backend=="v2"` branch building V2Microcontroller, with a connect path that does ONE
+      `initialize_drivers()` (applies def_phil.h current/ustep/ramp) and does NOT auto-`reset()`. (CRITICAL)
+- [ ] **Count constants ~32x too small** at the new microstep scale (~175 microsteps/mm at the tip vs legacy
+      ~5.5/mm). Rescale by 32: robot.py MOVE_CHUNK_USTEPS(40→~1280), APPROACH_PRE_USTEPS(80→~2560),
+      APPROACH_CONFIRM_TOL & OK(8→~256), APPROACH_MAX_CORRECTION(30→~960), FRAME_RESET_THRESHOLD(80→~2560),
+      _MAX_SPAN_USTEPS(12→~384), the line-564 noise gate(16→~512); jog_teach.STEPS → ~[64,128,256,512,1024];
+      set constants.MICROSTEPPING_*=256 (fixes the real Z mm-path too). _MAX_LINEAR_DEV is dimensionless—leave.
+      Best done as a single SCALE/USTEPS_PER_MM source shared by both backends. (CRITICAL)
+- [ ] **Toolchain**: FastLED + PacketSerial libs not installed; needed to compile (PacketSerial is included
+      unconditionally even with joystick off). Install, then COMPILE .hex without flashing to prove it builds. (WARN)
+- [ ] un-hardcode `jog_teach.py` backend="legacy".
+
+NOTED (not blocking bring-up):
+- X/Y current scale lands at CS=14 (firmware comment prefers >16); harmless, bump X/Y to ~570mA only if weak.
+- v2_mc set_max_velocity_acceleration is a no-op (relies on def_phil.h ramps) → CLI set_speed/apply_motion_profile
+  are inert on v2; fine for bring-up.
+- THETA status bytes [14-17] are never written by firmware → theta_pos is garbage (unused; ignore).
+- robot.py home_arms() polarity must be corrected before any v2 limit-switch homing (we avoid homing at bring-up).
+
 ## Rollback
 - Legacy `.ino` found → flash it, set `backend="legacy"`, restore the 4 backup .json. Byte-identical.
 - Not found → stay on v2-from-repo + recalibrate (always available). A Teensy can't be bricked
