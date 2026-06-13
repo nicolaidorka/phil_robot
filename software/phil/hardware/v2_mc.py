@@ -127,19 +127,29 @@ class V2Microcontroller:
             if len(buf) > MSG_LENGTH * 8:
                 del buf[:-MSG_LENGTH * 4]
             return
-        last = best + ((len(buf) - best) // MSG_LENGTH - 1) * MSG_LENGTH
-        pk = bytes(buf[last:last + MSG_LENGTH])
-        self._cmd_id_mcu = pk[0]
-        self._cmd_execution_status = pk[1]
-        ox, oy, oz, ot = (POS_OFFSETS[a] for a in ("X", "Y", "Z", "THETA"))
-        self.x_pos = int.from_bytes(pk[ox:ox + 4], "big", signed=True)
-        self.y_pos = int.from_bytes(pk[oy:oy + 4], "big", signed=True)
-        self.z_pos = int.from_bytes(pk[oz:oz + 4], "big", signed=True)
-        self.theta_pos = int.from_bytes(pk[ot:ot + 4], "big", signed=True)
-        self.button_and_switch_state = pk[SWITCH_BYTE]
-        if self.mcu_cmd_execution_in_progress and pk[0] == self._cmd_id and pk[1] == COMPLETED:
-            self.mcu_cmd_execution_in_progress = False
-        del buf[:last]
+        # Scan EVERY complete packet from the aligned offset. Position comes from the
+        # newest, but the COMPLETED transition is checked on each: the firmware emits
+        # the COMPLETED packet for a cmd_id exactly once, so if several packets piled
+        # up we must not look only at the last (else the busy flag sticks until the
+        # wait() timeout and the next move could be issued mid-motion).
+        n_pkts = (len(buf) - best) // MSG_LENGTH
+        last_off = best + (n_pkts - 1) * MSG_LENGTH
+        for k in range(n_pkts):
+            off = best + k * MSG_LENGTH
+            if (self.mcu_cmd_execution_in_progress
+                    and buf[off] == self._cmd_id and buf[off + 1] == COMPLETED):
+                self.mcu_cmd_execution_in_progress = False
+        pk = bytes(buf[last_off:last_off + MSG_LENGTH])
+        ox, oy, oz = POS_OFFSETS["X"], POS_OFFSETS["Y"], POS_OFFSETS["Z"]
+        with self._lock:                 # consistent (x,y,z) snapshot vs get_pos()
+            self._cmd_id_mcu = pk[0]
+            self._cmd_execution_status = pk[1]
+            self.x_pos = int.from_bytes(pk[ox:ox + 4], "big", signed=True)
+            self.y_pos = int.from_bytes(pk[oy:oy + 4], "big", signed=True)
+            self.z_pos = int.from_bytes(pk[oz:oz + 4], "big", signed=True)
+            self.theta_pos = 0           # firmware never writes the theta bytes
+            self.button_and_switch_state = pk[SWITCH_BYTE]
+        del buf[:last_off]
 
     # -------------------------------------------------------------- sending
     def _send(self, opcode, p0=0, p1=0, p2=0, p3=0, p4=0, expect_ack=True):
@@ -176,10 +186,10 @@ class V2Microcontroller:
 
     # ------------------------------------------------------------- status
     def get_pos(self):
-        return (int(round(self.x_pos * SCALE)),
-                int(round(self.y_pos * SCALE)),
-                int(round(self.z_pos * SCALE)),
-                self.theta_pos)
+        with self._lock:                 # snapshot all axes from the same frame
+            x, y, z = self.x_pos, self.y_pos, self.z_pos
+        return (int(round(x * SCALE)), int(round(y * SCALE)),
+                int(round(z * SCALE)), 0)
 
     def is_busy(self):
         return self.mcu_cmd_execution_in_progress

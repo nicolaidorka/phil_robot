@@ -195,6 +195,17 @@ class PhilRobot:
             self.APPROACH_OK_USTEPS = cls.APPROACH_OK_USTEPS * s
             self.APPROACH_MAX_CORRECTION = cls.APPROACH_MAX_CORRECTION * s
             self.FRAME_RESET_THRESHOLD = cls.FRAME_RESET_THRESHOLD * s
+            # v2 honors accel ramps at the (low) bring-up velocity, so a chunk leg
+            # takes longer than the legacy fixed-profile 2.0 s settle budget.
+            self.APPROACH_CONFIRM_TIMEOUT = 8.0
+
+        if self.backend == "v2":
+            # A persisted phil_frame.json reanchor offset is in LEGACY ustep units;
+            # applied on v2 it would be a 32x-too-small shift. Start from identity and
+            # re-anchor fresh on v2 (the geometry is re-taught at the finer scale anyway).
+            self.frame_correction = dict(IDENTITY_CORRECTION)
+            self._last_joints = None
+            self.frame_suspect = False
 
         # commanded position in robot mm (authoritative once homed/zeroed)
         self._pos = {"X": 0.0, "Y": 0.0, "Z": 0.0}
@@ -383,16 +394,17 @@ class PhilRobot:
     def home_arms(self):
         """Home Y then X, one motor enabled at a time, then zero both."""
         self._require()
-        # home Y (right arm) with X disabled
-        self.mc.set_axis_enable_disable(C.AXIS_X, 1)
-        self.mc.set_axis_enable_disable(C.AXIS_Y, 0)
+        # home Y (right arm) with X disabled. Firmware polarity: 0=disable, 1=enable
+        # (the legacy driver no-ops this; v2 honors it, so use the firmware convention).
+        self.mc.set_axis_enable_disable(C.AXIS_X, 0)
+        self.mc.set_axis_enable_disable(C.AXIS_Y, 1)
         self.mc.home_y()
         self._wait()
         self.mc.zero_y()
         self._wait()
         # home X (left arm) with Y disabled
-        self.mc.set_axis_enable_disable(C.AXIS_X, 0)
-        self.mc.set_axis_enable_disable(C.AXIS_Y, 1)
+        self.mc.set_axis_enable_disable(C.AXIS_X, 1)
+        self.mc.set_axis_enable_disable(C.AXIS_Y, 0)
         self.mc.home_x()
         self._wait()
         self.mc.zero_x()
@@ -412,9 +424,12 @@ class PhilRobot:
         """Position read back from the firmware (mm), for verification."""
         self._require()
         x, y, z, _ = self.mc.get_pos()
-        return {"X": C.usteps_to_mm("X", x),
-                "Y": C.usteps_to_mm("Y", y),
-                "Z": C.usteps_to_mm("Z", z)}
+        # mm<->ustep math in constants assumes microstepping 8 (legacy repo-usteps);
+        # the v2 firmware reports raw 256-microsteps, so divide back by the scale.
+        s = self._ustep_scale
+        return {"X": C.usteps_to_mm("X", x / s),
+                "Y": C.usteps_to_mm("Y", y / s),
+                "Z": C.usteps_to_mm("Z", z / s)}
 
     # ------------------------------------------------------------- limits
     def _check_limit(self, axis: str, mm: float):
@@ -427,7 +442,9 @@ class PhilRobot:
     # ------------------------------------------------------- low-level move
     def _move_axis_abs(self, axis: str, mm: float):
         self._check_limit(axis, mm)
-        usteps = C.mm_to_usteps(axis, mm)
+        # constants give legacy repo-usteps (microstepping 8); v2 commands raw
+        # 256-microsteps, so scale up to the firmware's unit.
+        usteps = C.mm_to_usteps(axis, mm) * self._ustep_scale
         {"X": self.mc.move_x_to_usteps,
          "Y": self.mc.move_y_to_usteps,
          "Z": self.mc.move_z_to_usteps}[axis](usteps)
@@ -844,7 +861,8 @@ class PhilRobot:
                            f"-> translation-only")
         # snap near-identity to exact identity
         if (abs(a - 1) < 1e-6 and abs(e - 1) < 1e-6 and abs(b) < 1e-6 and abs(d) < 1e-6
-                and abs(cx) <= _SNAP_IDENTITY and abs(cy) <= _SNAP_IDENTITY):
+                and abs(cx) <= _SNAP_IDENTITY * self._ustep_scale
+                and abs(cy) <= _SNAP_IDENTITY * self._ustep_scale):
             return dict(IDENTITY_CORRECTION), "snap-to-identity"
         return aff, f"full affine ({len(pts)} pts)"
 

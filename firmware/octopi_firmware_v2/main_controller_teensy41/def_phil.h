@@ -80,11 +80,13 @@ static const long Y_POS_LIMIT_MM = 130;
 static const long Z_NEG_LIMIT_MM = -20;
 static const long Z_POS_LIMIT_MM = 20;
 
-// Motor RMS current -- START LOW. SST43D1125 (NEMA-17) is rated well above this;
-// the arm is light so low current is plenty. Raise only if it stalls/loses steps,
-// watching motor temperature. (platereader used 1000 mA for smaller NEMA-11.)
-float X_MOTOR_RMS_CURRENT_mA = 500;
-float Y_MOTOR_RMS_CURRENT_mA = 500;
+// Motor RMS current -- conservatively LOW. SST43D1125 (NEMA-17) is rated well above
+// this; the arm is light so low current is plenty. Raise only if it stalls/loses
+// steps, watching motor temperature. (platereader used 1000 mA for smaller NEMA-11.)
+// X/Y = 560 mA so the TMC2660 current-scale code lands at >=16/31 (the .ino warns
+// values below 16 give coarse/imprecise current regulation -> lost microsteps).
+float X_MOTOR_RMS_CURRENT_mA = 560;
+float Y_MOTOR_RMS_CURRENT_mA = 560;
 float Z_MOTOR_RMS_CURRENT_mA = 300;
 
 float X_MOTOR_I_HOLD = 0.25;

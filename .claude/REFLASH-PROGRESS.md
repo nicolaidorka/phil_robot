@@ -113,6 +113,29 @@ NOTED (not blocking bring-up):
 - THETA status bytes [14-17] are never written by firmware → theta_pos is garbage (unused; ignore).
 - robot.py home_arms() polarity must be corrected before any v2 limit-switch homing (we avoid homing at bring-up).
 
+## Second full agent review (4 agents, 2026-06-12) — bugs FIXED
+- [x] **home_arms() enable/disable polarity** was inverted for v2 (firmware: 0=disable,1=enable) — it would
+      energize BOTH arms while homing one. Fixed in robot.py (harmless to legacy, which no-ops the call).
+- [x] **Stale phil_frame.json on v2**: a legacy reanchor offset would apply 32x-too-small. robot.py now resets
+      frame_correction to identity on the v2 backend (re-anchor fresh on v2).
+- [x] **mm-path mis-scaled 32x on v2** (Z safe-lift in home, read_position): _move_axis_abs multiplies by
+      _ustep_scale; read_position divides by it. (goto/teach were already pure count-path, unaffected.)
+- [x] **APPROACH_CONFIRM_TIMEOUT** 2.0s too short for v2's ramped legs -> 8.0s on v2 (per-leg settle).
+- [x] **_SNAP_IDENTITY** anchor snap threshold scaled by _ustep_scale.
+- [x] **Driver completion detection**: _resync_and_parse now scans EVERY queued packet for the COMPLETED ack
+      (was only the last -> busy flag could stick until timeout, risking a move issued mid-motion).
+- [x] **Driver thread-safety**: position writes + get_pos() now use the (previously dead) lock for a consistent
+      (x,y,z) snapshot; theta (never written by firmware) hard-set to 0 instead of reading garbage.
+- [x] **X/Y motor current 500->560 mA** so the TMC2660 current-scale code reaches the firmware-recommended >=16
+      (below it = coarse regulation -> lost microsteps). Still safe-low for the NEMA-17; recompiled clean.
+- [x] **.gitignore** now ignores *.bak (config backups were untracked-but-not-ignored).
+Verified: firmware recompiles clean (FLASH 38640 B); `PhilRobot(backend='v2')` -> scale 32, CONFIRM_TIMEOUT 8.0,
+identity frame; sim/legacy unchanged. Driver+jog_teach import clean.
+KNOWN-MINOR (not blocking, documented): wait_till_operation_is_completed still force-clears the busy flag on a
+genuine timeout (bounded fallback; COMPLETED detection is now reliable); firmware checksum-error status isn't
+surfaced (relies on timeout); some "full-step" code comments are stale on v2 (cosmetic); R_sense 0.22/0.43 and
+the x=1/y=0 axis map still need a one-time bring-up confirmation.
+
 ## Rollback
 - Legacy `.ino` found → flash it, set `backend="legacy"`, restore the 4 backup .json. Byte-identical.
 - Not found → stay on v2-from-repo + recalibrate (always available). A Teensy can't be bricked

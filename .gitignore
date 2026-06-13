@@ -11,3 +11,5 @@ build/
 dist/
 __pycache__/
 firmware/build/
+*.bak
+software/phil/config/*.bak
