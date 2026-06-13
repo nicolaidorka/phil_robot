@@ -17,15 +17,28 @@ import os
 
 from ..paths import DEFAULT_TEACH_PATH  # re-exported so callers keep importing it from here
 
-CORNERS = ("A1", "A12", "H1", "H12")
+CORNERS = ("A1", "A12", "H1", "H12")    # default (96-well) corners, for display/messages
+
+
+def plate_corners(plate) -> tuple:
+    """The four geometric corner wells for THIS plate (A1/A12/H1/H12 for a 96,
+    A1/A24/P1/P24 for a 384). Use this instead of the hardcoded 96-well CORNERS so
+    interpolation/anchor span the real plate."""
+    r0, r1 = plate.rows[0], plate.rows[-1]
+    c0, c1 = plate.columns[0], plate.columns[-1]
+    return (f"{r0}{c0}", f"{r0}{c1}", f"{r1}{c0}", f"{r1}{c1}")
 
 
 class TeachTable:
     def __init__(self, labware="eppendorf_twintec_lobind_96_pcr.json",
-                 z_travel_usteps=None):
+                 z_travel_usteps=None, ustep_scale=None):
         self.labware = labware
         self.taught: dict[str, dict] = {}        # well -> {'X':int,'Y':int,'Z':int}
-        self.z_travel_usteps = z_travel_usteps   # absolute travel Z (repo usteps)
+        self.z_travel_usteps = z_travel_usteps   # absolute travel Z (firmware usteps)
+        # Marks the joint-count unit the data was taught in: None/8 = legacy
+        # full-step firmware, 256 = v2 microstep firmware. goto refuses to replay
+        # data taught at the wrong scale (it would be 32x off).
+        self.ustep_scale = ustep_scale
 
     # -------------------------------------------------------------- teaching
     def teach(self, well_id, x, y, z):
@@ -38,8 +51,9 @@ class TeachTable:
     def is_taught(self, well_id) -> bool:
         return well_id.strip().upper() in self.taught
 
-    def corners_present(self) -> bool:
-        return all(c in self.taught for c in CORNERS)
+    def corners_present(self, plate=None) -> bool:
+        corners = plate_corners(plate) if plate is not None else CORNERS
+        return all(c in self.taught for c in corners)
 
     # ----------------------------------------------------------- resolution
     def joint_for_well(self, well_id, plate) -> dict:
@@ -47,17 +61,18 @@ class TeachTable:
         w = well_id.strip().upper()
         if w in self.taught:
             return dict(self.taught[w])
-        if not self.corners_present():
-            missing = [c for c in CORNERS if c not in self.taught]
+        corners = plate_corners(plate)        # real plate corners (96 or 384, etc.)
+        if not self.corners_present(plate):
+            missing = [c for c in corners if c not in self.taught]
             raise KeyError(
                 f"well {w} is not taught and the corners {missing} are not all "
-                f"taught yet (need {CORNERS} to interpolate). Teach it directly.")
+                f"taught yet (need {corners} to interpolate). Teach it directly.")
         row, col = plate.parse_well_id(w)
         n_rows = len(plate.rows)
         n_cols = len(plate.columns)
-        u = col / (n_cols - 1) if n_cols > 1 else 0.0   # 0 at col1 .. 1 at col12
-        v = row / (n_rows - 1) if n_rows > 1 else 0.0   # 0 at row A .. 1 at row H
-        a1, a12, h1, h12 = (self.taught[c] for c in CORNERS)
+        u = col / (n_cols - 1) if n_cols > 1 else 0.0   # 0 at first col .. 1 at last
+        v = row / (n_rows - 1) if n_rows > 1 else 0.0   # 0 at first row .. 1 at last
+        a1, a12, h1, h12 = (self.taught[c] for c in corners)
         out = {}
         for axis in ("X", "Y", "Z"):
             out[axis] = int(round(
@@ -77,6 +92,7 @@ class TeachTable:
     def to_dict(self) -> dict:
         return {"labware": self.labware,
                 "z_travel_usteps": self.z_travel_usteps,
+                "ustep_scale": self.ustep_scale,
                 "taught": self.taught}
 
     def save(self, path=None) -> str:
@@ -94,7 +110,8 @@ class TeachTable:
         with open(path) as f:
             d = json.load(f)
         t = cls(labware=d.get("labware", "eppendorf_twintec_lobind_96_pcr.json"),
-                z_travel_usteps=d.get("z_travel_usteps"))
+                z_travel_usteps=d.get("z_travel_usteps"),
+                ustep_scale=d.get("ustep_scale"))
         t.taught = {k.upper(): v for k, v in d.get("taught", {}).items()}
         return t
 

@@ -165,10 +165,12 @@ def main(argv=None):
 
     bot = PhilRobot(backend="v2" if use_v2 else "legacy")
     # On v2 the joint counts are 32x finer (microsteps, not full-steps), so scale
-    # the jog increments to keep the same physical nudge sizes.
+    # the jog increments to keep the same physical nudge sizes, and STAMP the teach
+    # table as v2-scale so goto will accept the freshly-taught data.
     if bot._ustep_scale != 1:
         global STEPS
         STEPS = [s * bot._ustep_scale for s in STEPS]
+        bot.teach_table.ustep_scale = 256
     bot.connect()
 
     if anchor_mode:

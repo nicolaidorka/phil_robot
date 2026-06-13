@@ -136,6 +136,24 @@ genuine timeout (bounded fallback; COMPLETED detection is now reliable); firmwar
 surfaced (relies on timeout); some "full-step" code comments are stale on v2 (cosmetic); R_sense 0.22/0.43 and
 the x=1/y=0 axis map still need a one-time bring-up confirmation.
 
+## Third review (4 agents, 2026-06-12) — found NEW hazards prior passes missed; FIXED
+Agents 1-2 re-verified the second-review fixes are correct w/ no regression. Agent 3 (holistic) found:
+- [x] **CRITICAL: stale legacy-scale teach data live on v2.** config/phil_teach.json is byte-identical to the
+      legacy backup; on v2 goto would replay legacy counts as raw microsteps (32x off). FIX: TeachTable now has a
+      `ustep_scale` marker; on v2 with unmarked/legacy data the robot DROPS teach+kin_model+well_map and prints a
+      loud "re-teach: jog_teach --v2 --all" (goto disabled until then). jog_teach --v2 stamps ustep_scale=256.
+- [x] **CRITICAL: home()/home_arms()/home_z() do REAL limit-switch homing on v2** (legacy no-op'd it) into
+      unverified switches. FIX: _block_homing_on_v2() raises on the v2 backend; use set_home()/reanchor to zero.
+- [x] **384-well corners hardcoded to 96** (A1/A12/H1/H12) in teach interpolation + ANCHOR_WELLS. FIX: added
+      plate_corners(plate); interpolation + self.ANCHOR_WELLS now derive from the plate (384 -> A1/A24/P1/P24, verified).
+Verified: v2 construct clears stale teach + blocks homing; legacy keeps 72 wells + homing; 384 corners correct;
+all files compile; legacy resolve unaffected.
+KNOWN/DOCUMENTED (not fixed, bring-up items): W1 does opening serial reset the Teensy counter? (Teensy 4.x
+usually does NOT auto-reset on DTR, unlike Arduino — VERIFY on hardware; affects "frame preserved" claim).
+W4 the joint-space goto path bypasses mm soft-limits (firmware MOVETO is unclamped) — the stale-data guard
+removes the main hazard; consider a coarse joint-count sanity bound later. N: some legacy-era code comments
+("firmware ignores accel", "8-ustep grid") are stale on v2 (cosmetic).
+
 ## Rollback
 - Legacy `.ino` found → flash it, set `backend="legacy"`, restore the 4 backup .json. Byte-identical.
 - Not found → stay on v2-from-repo + recalibrate (always available). A Teensy can't be bricked

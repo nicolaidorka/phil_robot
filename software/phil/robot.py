@@ -35,7 +35,7 @@ import time
 from . import constants as C
 from . import paths
 from .geometry.calibration import Calibration
-from .geometry.teach import TeachTable, DEFAULT_TEACH_PATH
+from .geometry.teach import TeachTable, DEFAULT_TEACH_PATH, plate_corners
 from .geometry.well_plate import WellPlate
 
 try:
@@ -206,6 +206,22 @@ class PhilRobot:
             self.frame_correction = dict(IDENTITY_CORRECTION)
             self._last_joints = None
             self.frame_suspect = False
+            # Legacy-scale teach/kinematics data would be commanded as raw microsteps
+            # (32x too small) -> wrong moves. If the loaded teach table isn't marked
+            # v2-scale (ustep_scale==256), DROP it (and the legacy fit) so goto can't
+            # replay stale data; a fresh `jog_teach --v2 --all` re-teach is required.
+            if self.teach_table.taught and (self.teach_table.ustep_scale or 8) != 256:
+                print("** v2: on-disk teach/kinematics data is LEGACY-scale -> ignored. "
+                      "Re-teach on v2:  python3 -m phil.jog_teach --v2 --all  "
+                      "(goto is disabled until then).")
+                self.teach_table.taught = {}
+                self.teach_table.ustep_scale = 256
+                self.kin_model = None
+                self.well_map = None
+
+        # Plate-derived corner wells for interpolation / affine anchor (A1/A12/H1/H12
+        # for a 96, A1/A24/P1/P24 for a 384) -- not hardcoded to 96-well.
+        self.ANCHOR_WELLS = plate_corners(self.plate)
 
         # commanded position in robot mm (authoritative once homed/zeroed)
         self._pos = {"X": 0.0, "Y": 0.0, "Z": 0.0}
@@ -376,13 +392,26 @@ class PhilRobot:
         time with the other motor disabled to avoid interference.
         """
         self._require()
+        self._block_homing_on_v2()
         self.home_z(z_lift_mm)
         self.home_arms()
         self.homed = True
         print(f"homed. position={self.position()}")
 
+    def _block_homing_on_v2(self):
+        """Limit-switch homing drives the arm into the switches. On the v2 firmware
+        that is a REAL homing move (the legacy firmware no-op'd it), and Phil's limit
+        switches are unverified (RULES #5) -- so refuse it. Use set_home()/reanchor()
+        to zero the frame instead."""
+        if self.backend == "v2":
+            raise RuntimeError(
+                "limit-switch homing is unsafe/unverified on the v2 firmware "
+                "(it drives the arm into the switches). Zero the frame with "
+                "set_home() (jog to a reference first) or reanchor() instead.")
+
     def home_z(self, z_lift_mm: float = 1.0):
         self._require()
+        self._block_homing_on_v2()
         self.mc.home_z()
         self._wait()
         self.mc.zero_z()
@@ -394,6 +423,7 @@ class PhilRobot:
     def home_arms(self):
         """Home Y then X, one motor enabled at a time, then zero both."""
         self._require()
+        self._block_homing_on_v2()
         # home Y (right arm) with X disabled. Firmware polarity: 0=disable, 1=enable
         # (the legacy driver no-ops this; v2 honors it, so use the firmware convention).
         self.mc.set_axis_enable_disable(C.AXIS_X, 0)
