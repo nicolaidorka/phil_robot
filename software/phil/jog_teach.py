@@ -20,12 +20,11 @@ Each arrow drives ONE motor by a clean whole step (no rounding):
     q               save and quit
 
 NOTE: the joints are rotary with some backlash, so reversing direction loses a
-little motion. ``goto`` always closes in on a well from -X,-Y and finishes with a
-+X,+Y creep, so teach each well THE SAME WAY: approach from the lower-left and make
-your FINAL nudges Up and/or Right (don't finish on Down/Left). The console shows
-"approach: +X+Y ok" when you're good; it still records either way but a Down/Left
-finish lands a hair less precisely. The arm auto-approaches each well with that same
-+X,+Y motion, so often you only fine-center and press Enter.
+little motion. The console now RECORDS which way your last nudge went per axis and
+``goto`` REPLAYS that same finish, so you can center each well however is natural --
+finishing Up/Right or Down/Left no longer matters (the machine cancels its own
+backlash). The arm auto-approaches each well from the lower-left, so often you only
+fine-center and press Enter.
 
 It tells you which well to go to. Jog the outlet over it, press Enter, repeat.
 After a few wells it fits the mm<->joint map (from the labware JSON) so you can
@@ -39,11 +38,41 @@ import time
 import tty
 
 from .robot import PhilRobot
+from .constants import DEFAULT_BACKEND
 from .geometry.well_plate import WellPlate
 
 # Order I guide you through: 4 corners (best spread) + 2 middles to capture the
 # arm's curve. You can change this list or just keep going past it.
 GUIDE = ["A1", "A12", "H1", "H12", "D6", "E7"]
+
+
+def _cross(plate):
+    """Corner-first, 2-D-spread teach list for a light-but-robust 5-bar fit:
+    the 4 corners, then row-A interior, then column-1 interior, then a few interior
+    wells. The interior scatter is the key bit -- a BARE row+column cross is nearly
+    rank-deficient for the 5-bar's mirror ambiguity (the wrong assembly mode fits the
+    cross then blows up in the middle), so we add genuine 2-D spread."""
+    rc = {wid: WellPlate.parse_well_id(wid) for wid in plate.well_ids()}
+    rows = sorted({r for r, _ in rc.values()})
+    cols = sorted({c for _, c in rc.values()})
+    byrc = {(r, c): wid for wid, (r, c) in rc.items()}
+    if len(rows) < 2 or len(cols) < 2:
+        return list(plate.well_ids())
+    r0, r1, c0, c1 = rows[0], rows[-1], cols[0], cols[-1]
+    order = [byrc.get((r0, c0)), byrc.get((r0, c1)),          # corners (spread first
+             byrc.get((r1, c0)), byrc.get((r1, c1))]          # so auto-approach works)
+    order += [byrc.get((r0, c)) for c in cols[1:-1]]          # row-A interior
+    order += [byrc.get((r, c0)) for r in rows[1:-1]]          # column-1 interior
+    for rf, cf in ((0.4, 0.45), (0.3, 0.75), (0.55, 0.3), (0.7, 0.75)):   # interior scatter
+        ri = min(len(rows) - 2, max(1, round(rf * (len(rows) - 1))))
+        ci = min(len(cols) - 2, max(1, round(cf * (len(cols) - 1))))
+        order.append(byrc.get((rows[ri], cols[ci])))
+    seen, out = set(), []
+    for w in order:
+        if w and w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
 
 
 def _serpentine(plate):
@@ -87,10 +116,15 @@ HINTS = {
 STEPS = [8, 16, 32, 64, 120]        # = 1, 2, 4, 8, 15 full-steps (~1,2,4,8,15 mm)
 DEFAULT_STEP_IDX = 1
 
+import select
+_keybuf = []                # decoded type-ahead keys read but not yet consumed
+_NO_APPROACH = False        # set by --no-approach: never auto-drive the arm
 
 
 def _read_key():
     """Read one keypress (arrow keys decoded) from a cbreak-mode stdin."""
+    if _keybuf:
+        return _keybuf.pop(0)
     ch = sys.stdin.read(1)
     if ch == "\x1b":                 # escape sequence (arrow keys)
         seq = sys.stdin.read(2)
@@ -100,21 +134,33 @@ def _read_key():
     return ch
 
 
-def _finish_ok(last_dir):
-    """The well must be reached with a +X,+Y (Up/Right) finish so goto, which
-    always creeps +X,+Y, lands the outlet where it was taught. A reversal (the
-    last X or Y nudge was Down/Left) leaves a ~1 backlash-gap offset."""
-    return last_dir is None or (last_dir["X"] != -1 and last_dir["Y"] != -1)
+def _coalesce(fd, key, cap=8):
+    """Merge already-queued (type-ahead) presses of the SAME key into ONE move, so
+    fast taps become a single smooth jog instead of N laggy start/stops -- and nothing
+    is dropped (a different key is buffered for the next loop). Capped so a held key
+    can't slam one huge move; the remainder just replays on later iterations."""
+    n = 1
+    while n < cap and select.select([fd], [], [], 0)[0]:
+        k = _read_key()
+        if k == key:
+            n += 1
+        else:
+            _keybuf.append(k)
+            break
+    return n
 
 
 def _status(bot, target, step, recorded, last_dir=None):
     j = bot.joint_position()
     tgt = target if target else "(free)"
     done = ",".join(recorded) if recorded else "none"
-    flag = "+X+Y ok " if _finish_ok(last_dir) else "NUDGE Up/Right"
+    # Show the finish direction goto will replay (0 = no nudge since the +X,+Y
+    # approach -> replays +). Purely informational now; any direction is fine.
+    fx = (last_dir or {}).get("X", 0); fy = (last_dir or {}).get("Y", 0)
+    flag = f"{'+' if fx >= 0 else '-'}X{'+' if fy >= 0 else '-'}Y"
     sys.stdout.write(
         f"\r  TARGET: {tgt:4s} | X={j['X']:+5d} Y={j['Y']:+5d} Z={j['Z']:+5d}"
-        f" | step={step:3d} | approach: {flag} | done: {done}        "
+        f" | step={step:3d} | finish->replay: {flag} | done: {done}        "
     )
     sys.stdout.flush()
 
@@ -131,7 +177,7 @@ def _approach(bot, target, anchor_mode=False, always=False):
     goto target, so even already-taught wells are auto-approached; plain teach
     mode uses the raw map and skips taught wells.
     """
-    if not target:
+    if not target or _NO_APPROACH:          # --no-approach: never auto-drive (it can jam)
         return
     try:
         if anchor_mode or always:
@@ -157,8 +203,18 @@ def main(argv=None):
     raw = list(argv if argv is not None else _sys.argv[1:])
     anchor_mode = "--anchor" in raw
     all_mode = "--all" in raw
-    use_v2 = "--v2" in raw                      # post-reflash microstep firmware
-    raw = [a for a in raw if a not in ("--anchor", "--all", "--v2")]
+    cross_mode = "--cross" in raw               # corners + row + col + interior scatter
+    no_approach = "--no-approach" in raw or "--noapproach" in raw  # skip the auto-drive entirely
+    # Backend defaults to the flashed firmware (constants.DEFAULT_BACKEND, = v2);
+    # --legacy forces the old driver, --v2 is the (now redundant) explicit opt-in.
+    if "--legacy" in raw:
+        use_v2 = False
+    elif "--v2" in raw:
+        use_v2 = True
+    else:
+        use_v2 = (DEFAULT_BACKEND == "v2")
+    raw = [a for a in raw if a not in ("--anchor", "--all", "--cross", "--v2", "--legacy",
+                                       "--no-approach", "--noapproach")]
     # --labware <name> and --teach <path>: teach a non-default plate (e.g. a 384)
     # into its own teach file, so 96 and 384 don't co-mingle in one JSON.
     labware = teach = None
@@ -173,7 +229,9 @@ def main(argv=None):
     raw = rest
     # When specific wells are named (re-teaching a few), auto-drive to each one
     # like --all does, so you just fine-center instead of jogging there by hand.
-    auto_approach = all_mode or (not anchor_mode and bool(raw))
+    auto_approach = (all_mode or cross_mode or (not anchor_mode and bool(raw))) and not no_approach
+    global _NO_APPROACH
+    _NO_APPROACH = no_approach
 
     bot = PhilRobot(backend="v2" if use_v2 else "legacy",
                     labware_path=labware, teach_path=teach)
@@ -197,13 +255,17 @@ def main(argv=None):
     elif all_mode:
         # Teach EVERY well on the plate, in a snake order to minimise travel.
         guide = _serpentine(bot.plate)
+    elif cross_mode:
+        # Light, 2-D-spread set: corners + row A + column 1 + interior scatter.
+        guide = _cross(bot.plate)
     else:
         # Optional: pass specific wells to teach/refine, e.g.
         #   python -m phil.jog_teach A6 H6 C1 C12
         guide = [w.upper() for w in raw] or list(GUIDE)
 
     print(__doc__)
-    label = "ANCHOR" if anchor_mode else ("TEACH-ALL" if all_mode else "TEACH")
+    label = ("ANCHOR" if anchor_mode else "TEACH-ALL" if all_mode
+             else "TEACH-CROSS" if cross_mode else "TEACH")
     if all_mode:
         already = sum(1 for w in guide if bot.teach_table.is_taught(w))
         print(f"{label}: {len(guide)} wells, {already} already taught. "
@@ -223,15 +285,17 @@ def main(argv=None):
               " resume (already-taught wells are re-approached so you can confirm"
               " or 'n' past them).\n")
     else:
-        print("Tip: on the FIRST well, center it then press 'h' (home) before Enter."
-              " For refine runs (map already built) the arm auto-approaches each well"
-              " - just nudge and Enter.\n")
+        print("Re-teaching one/few wells: jog onto the well center, Enter to record.\n"
+              "  - Do NOT press 'h' unless this is a FROM-SCRATCH teach of the FIRST"
+              " well -- 'h' ZEROS the whole frame and SHIFTS every other taught well"
+              " (that's how a single re-teach can wreck all the others).\n")
 
     step_idx = DEFAULT_STEP_IDX
     gi = 0
     recorded = []
     # last manual jog direction per axis (+1/-1; 0 = none since the +X,+Y approach).
-    # A taught well must be finished with +X,+Y so goto's +X,+Y creep reproduces it.
+    # Recorded WITH the well (teach_well finish=...) so goto replays the same backlash
+    # engagement -- the operator may finish in any direction.
     last_dir = {"X": 0, "Y": 0}
 
     fd = sys.stdin.fileno()
@@ -247,17 +311,17 @@ def main(argv=None):
             step = STEPS[step_idx]
             key = _read_key()
             if key == "UP":
-                bot.jog_joint(dx=step); last_dir["X"] = 1
+                bot.jog_joint(dx=step * _coalesce(fd, "UP")); last_dir["X"] = 1
             elif key == "DOWN":
-                bot.jog_joint(dx=-step); last_dir["X"] = -1
+                bot.jog_joint(dx=-step * _coalesce(fd, "DOWN")); last_dir["X"] = -1
             elif key == "RIGHT":
-                bot.jog_joint(dy=step); last_dir["Y"] = 1
+                bot.jog_joint(dy=step * _coalesce(fd, "RIGHT")); last_dir["Y"] = 1
             elif key == "LEFT":
-                bot.jog_joint(dy=-step); last_dir["Y"] = -1
+                bot.jog_joint(dy=-step * _coalesce(fd, "LEFT")); last_dir["Y"] = -1
             elif key == "a":
-                bot.jog_joint(dz=step)
+                bot.jog_joint(dz=step * _coalesce(fd, "a"))
             elif key == "z":
-                bot.jog_joint(dz=-step)
+                bot.jog_joint(dz=-step * _coalesce(fd, "z"))
             elif key in ("+", "="):
                 step_idx = min(step_idx + 1, len(STEPS) - 1)
             elif key in ("-", "_"):
@@ -283,14 +347,17 @@ def main(argv=None):
                     _approach(bot, target, anchor_mode)
                     last_dir = {"X": 0, "Y": 0}
                 else:
-                    if not _finish_ok(last_dir):
-                        sys.stdout.write(
-                            "\n  [heads up: last nudge was Down/Left. goto closes in +X,+Y,"
-                            " so finishing with Up/Right lands a bit more precisely next"
-                            " time. Recorded anyway.]")
-                    bot.teach_well(target)
+                    # Record which way the last nudge engaged each axis so goto replays
+                    # the SAME backlash state (0 = untouched since the +X,+Y approach ->
+                    # treat as +). Finish direction no longer needs to be Up/Right.
+                    fx = last_dir["X"] if last_dir["X"] != 0 else 1
+                    fy = last_dir["Y"] if last_dir["Y"] != 0 else 1
+                    bot.teach_well(target, finish=(fx, fy))
                     recorded.append(target)
-                    sys.stdout.write(f"\n  [recorded {target}]  {bot.calibration.summary()}\n")
+                    sys.stdout.write(
+                        f"\n  [recorded {target}: finish {'+' if fx > 0 else '-'}X,"
+                        f"{'+' if fy > 0 else '-'}Y -> goto replays it]  "
+                        f"{bot.calibration.summary()}\n")
                     gi += 1
                     target = guide[gi] if gi < len(guide) else None
                     if target is None:

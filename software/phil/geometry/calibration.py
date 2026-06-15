@@ -269,7 +269,11 @@ class Calibration:
             return ("calibration: NOMINAL (uncalibrated PLATE_READER defaults; "
                     "measure reference wells for accuracy)")
         kind = {1: "translation-only", 2: "rotation+scale"}.get(n, "full affine + tilt")
-        rms = f"{self._rms_error_mm:.3f} mm" if self._rms_error_mm is not None else "n/a"
+        rms = f"{self._rms_error_mm:.3f}" if self._rms_error_mm is not None else "n/a"
         wells = ", ".join(p.well for p in self.reference_points)
+        # NB: this affine map is only the LAST-RESORT fallback (a straight-line fit of a
+        # curved 5-bar arm), so its residual is large and reported in joint-usteps, not mm
+        # -- it is IGNORED once the 5-bar kinematics is fitted. Don't be alarmed by it.
         return (f"calibration: {kind} from {n} point(s) [{wells}]; "
-                f"fit RMS error {rms}; {len(self.well_overrides)} per-well override(s)")
+                f"fit residual {rms} (affine fallback, ignored when kinematics fitted); "
+                f"{len(self.well_overrides)} per-well override(s)")

@@ -12,6 +12,8 @@ Keys:
     a / z           Z up / down
     + / -           bigger / smaller jog step
     g               go to a well (type the well id, e.g. D6, then Enter)
+    r               reanchor: lock the whole frame to A1 (jog onto A1's center first,
+                    then press r — recovers a shifted frame, no re-teach)
     p               print the current joint position
     q               quit
 
@@ -21,12 +23,14 @@ wells. The joints are rotary with backlash, so jog small.
 """
 from __future__ import annotations
 
+import select
 import sys
 import termios
 import time
 import tty
 
 from .robot import PhilRobot
+from .constants import DEFAULT_BACKEND
 
 # Jog sizes in repo usteps. The firmware moves in whole full-steps (8 usteps each,
 # ~1 mm of outlet travel near the plate), so these are multiples of 8.
@@ -34,7 +38,12 @@ STEPS = [8, 16, 32, 64, 120]
 DEFAULT_STEP_IDX = 1
 
 
+_keybuf = []                # decoded type-ahead keys read but not yet consumed
+
+
 def _read_key():
+    if _keybuf:
+        return _keybuf.pop(0)
     ch = sys.stdin.read(1)
     if ch == "\x1b":                      # escape sequence (arrow keys)
         seq = sys.stdin.read(2)
@@ -44,11 +53,26 @@ def _read_key():
     return ch
 
 
+def _coalesce(fd, key, cap=8):
+    """Merge already-queued (type-ahead) presses of the SAME key into ONE move, so
+    fast taps become a single smooth jog instead of N laggy start/stops -- and nothing
+    is dropped (a different key is buffered for the next loop)."""
+    n = 1
+    while n < cap and select.select([fd], [], [], 0)[0]:
+        k = _read_key()
+        if k == key:
+            n += 1
+        else:
+            _keybuf.append(k)
+            break
+    return n
+
+
 def _status(bot, step):
     j = bot.joint_position()
     sys.stdout.write(
         f"\r  X={j['X']:+6d} Y={j['Y']:+6d} Z={j['Z']:+6d} | step={step:3d} usteps "
-        f"| arrows=move  a/z=Z  +/-=step  g=goto  p=pos  q=quit     "
+        f"| arrows=move  a/z=Z  +/-=step  g=goto  r=reanchor-A1  p=pos  q=quit     "
     )
     sys.stdout.flush()
 
@@ -69,7 +93,7 @@ def main(argv=None):
     raw = list(argv if argv is not None else _sys.argv[1:])
     simulate = "--simulate" in raw
 
-    bot = PhilRobot(backend="sim" if simulate else "legacy", simulate=simulate)
+    bot = PhilRobot(backend="sim" if simulate else DEFAULT_BACKEND, simulate=simulate)
     bot.connect()
     print(__doc__)
 
@@ -83,21 +107,32 @@ def main(argv=None):
             step = STEPS[step_idx]
             key = _read_key()
             if key == "UP":
-                bot.jog_joint(dx=step)
+                bot.jog_joint(dx=step * _coalesce(fd, "UP"))
             elif key == "DOWN":
-                bot.jog_joint(dx=-step)
+                bot.jog_joint(dx=-step * _coalesce(fd, "DOWN"))
             elif key == "RIGHT":
-                bot.jog_joint(dy=step)
+                bot.jog_joint(dy=step * _coalesce(fd, "RIGHT"))
             elif key == "LEFT":
-                bot.jog_joint(dy=-step)
+                bot.jog_joint(dy=-step * _coalesce(fd, "LEFT"))
             elif key == "a":
-                bot.jog_joint(dz=step)
+                bot.jog_joint(dz=step * _coalesce(fd, "a"))
             elif key == "z":
-                bot.jog_joint(dz=-step)
+                bot.jog_joint(dz=-step * _coalesce(fd, "z"))
             elif key in ("+", "="):
                 step_idx = min(step_idx + 1, len(STEPS) - 1)
             elif key in ("-", "_"):
                 step_idx = max(step_idx - 1, 0)
+            elif key == "r":
+                # Re-lock the frame to A1. Jog the nozzle onto A1's TRUE center first,
+                # then press r. Pure-translation correction -> reliable (not SET_POSITION),
+                # recovers a shifted frame with no re-teaching.
+                sys.stdout.write("\n  reanchoring frame to A1 at the current pose...\n")
+                try:
+                    cx, cy = bot.reanchor("A1")
+                    sys.stdout.write(f"  [frame locked to A1: translation cx={cx:+.0f} "
+                                     f"cy={cy:+.0f} usteps]\n")
+                except Exception as e:
+                    sys.stdout.write(f"  [reanchor failed: {e}]\n")
             elif key == "g":
                 well = _prompt_line(fd, old, "  go to well: ")
                 if well:

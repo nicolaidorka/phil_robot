@@ -1,5 +1,41 @@
 # Rules — operating & development
 
+## Process discipline — LOG EVERY FAILURE & EVERY COMPLAINT (mandatory)
+- **Log every failure mode in [LEARNINGS](LEARNINGS.md).** Anything that broke, was
+  reverted, regressed, corrupted data, wasted the user's time, or was just done
+  badly — write it down (newest first): what happened, the root cause, and the rule
+  it burns in. Do this BEFORE moving on, not "later."
+- **Log every piece of NEGATIVE FEEDBACK from the user** in LEARNINGS too — verbatim
+  gist + what I did wrong + how to avoid it next time. If the user is frustrated,
+  corrects me, or says something is bad/wrong/dumb, that is a learning to record, not
+  just a thing to fix in the moment.
+- The point is a permanent, cross-session record so the SAME mistake is never made
+  twice. When unsure whether something counts — log it.
+
+## KNOW THE HARDWARE FIRST — before ANY precision / accuracy / "it's a bit off" work
+**Mandatory.** Before chasing a positioning error by eye, by software, or by
+re-teaching, READ what the motors can physically do and state the floor up front.
+Do NOT theorize about backlash / speed / step-loss or nudge counts by eye before
+this. (Cost the user a long, frustrating session by skipping it — 2026-06-13.)
+- **Where it's written:** [`V2-FIRMWARE-NOTES.md`](V2-FIRMWARE-NOTES.md) (motors,
+  currents, tip resolution, board) and `software/phil/constants.py` (steps/rev,
+  microstepping, geometry, `mm_per_ustep`).
+- **The motors (this unit):** Shinano **SST43D1125 NEMA-17**, **200 full-steps/rev**
+  (1.8°), v2 = **256 µsteps/full-step** (32× the legacy 8), driven by a **TMC2660 at
+  X/Y = 560 mA** off a TMC4361A (Teensy 4.1 / Squid V4). Open-loop, **no encoder**.
+- **Resolution at the nozzle:** ~**170–227 µsteps/mm** (5-bar Jacobian; ~120/mm
+  measured near H12). So **one full-step at the tip ≈ 1.3–2 mm near H12**.
+- **THE FLOOR (why "a bit off" can't be nudged out):** at 560 mA the **microstep
+  holding torque can't hold intermediate positions under the heavy 5-bar arm**, so the
+  outlet settles toward the nearest full-step detent. Effective repeatability ≈ **one
+  full-step ≈ ~1–2 mm**. A sub-full-step count shift moves the tip **nothing** (proven:
+  a ~0.5 mm shift did not move it). Chasing below this by eye/software is wasted effort.
+- **To actually go below ~1 mm it is HARDWARE, not code:** raise X/Y motor current
+  (560 mA is conservative — more current → microsteps hold → finer effective res),
+  reduce mechanical backlash (belt/pulley/linkage play), or add an encoder (closed
+  loop). **NOT a camera** (user has banned it). State this to the user instead of
+  iterating by eye.
+
 ## Safety (physical arm)
 - **Jog small.** Rotary joints, very sensitive (~50 usteps/well). A few hundred
   usteps crosses the whole plate or runs off the edge. Start with small steps;
@@ -18,8 +54,13 @@
 - **Don't `reset()` / `initialize_drivers()` mid-session on legacy** unless you
   intend to zero the frame — both wipe the joint counter. (Legacy connect skips
   them on purpose.)
-- **Don't use `backend="stock"`** on this unit — the 8/24 protocol is rejected.
-  Use `backend="legacy"`.
+- **Backend defaults to `v2`** (`constants.DEFAULT_BACKEND`) — the flashed
+  microstep firmware, matching the v2-scale (ustep_scale=256) teach data. Just run
+  `python3 -m phil.cli` (no flag). The board was reflashed 2026-06-13, so **legacy
+  is the dead path now**: on legacy the v2 24-byte status mis-frames (garbage
+  positions like `33320960`) and the scale guard disables goto. Use `--legacy` /
+  `backend="legacy"` ONLY if the firmware is ever rolled back. **Don't use
+  `backend="stock"`** — the 8/24 protocol is rejected.
 - **Don't re-teach after a power-cycle.** Use `reanchor <well>` (1-well, translation).
   For a sharper edge fix, anchor the 4 corners: `anchor A1/A12/H1/H12` then `anchor fit`
   (affine correction; never refit the 5-bar — that's non-convex and can regress).
@@ -43,7 +84,13 @@
   **teach the boundary (rows A–E + H, 72/96) and refit**, so the model only
   *interpolates* the untaught interior rows **F and G** (bracketed by taught E
   and H). `goto` is taught-first; F/G come from the refit model (F6 verified
-  ~0.5 mm, **column 1 still weak**). This is already in place.
+  ~0.5 mm, **column 1 still weak**).
+- ⛔ **NOT currently in place (post-reflash, 2026-06-13).** That 72-well boundary
+  was taught on the legacy firmware and is **invalid in the v2 frame** (it's in
+  `config/pre-reflash-backup/`, not loaded). The live v2 teach is only **24/96**
+  (an L-shape), so the model is *extrapolating* today (corner LOO ≈ 12–13 mm).
+  **Redo the boundary teach in v2** (`jog_teach --all --v2` → `fitkin`) before
+  trusting any untaught well. See [UNITS-AND-CALIBRATION](UNITS-AND-CALIBRATION.md).
 - To teach more wells (e.g. push F/G or column-1 below model error):
   `python3 -m phil.jog_teach --all` — snake order, auto-approaching each from the
   last. Nudge to center, Enter to record, `n` to skip, final approach in ONE

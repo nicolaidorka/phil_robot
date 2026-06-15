@@ -34,7 +34,8 @@ def test_approach_is_two_step_from_below_and_lands_on_target():
     from phil import PhilRobot
     r = PhilRobot(backend="sim")
     r.connect()
-    r._move_joints_to(x=0, y=0)                      # known start
+    r.teach_table.taught = {}                        # <4 wells -> no joint-box clamp;
+    r._move_joints_to(x=0, y=0)                      # test pure approach, not clamping
     calls = _spy_absolute_moves(r)
 
     r._approach_joints(100, 200)
@@ -54,6 +55,7 @@ def test_approach_handles_negative_targets():
     from phil import PhilRobot
     r = PhilRobot(backend="sim")
     r.connect()
+    r.teach_table.taught = {}                        # disable the joint-box clamp
     r._move_joints_to(x=0, y=0)
     r._approach_joints(-52, -168)
     j = r.joint_position()
@@ -64,6 +66,7 @@ def test_confirm_joints_true_when_arrived_false_on_timeout():
     from phil import PhilRobot
     r = PhilRobot(backend="sim")
     r.connect()
+    r.teach_table.taught = {}                        # disable the joint-box clamp
     r._move_joints_to(x=120, y=140)
     assert r._confirm_joints(x=120, y=140, tol=0, timeout=0.5) is True
     # an unreachable target (sim never moves on its own) must time out, not hang

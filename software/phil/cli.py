@@ -25,6 +25,7 @@ Commands:
     wellpos <well>               show where a well resolves to (no move)
     travelz [usteps]             set a safe lift height for between-well travel
     scan <w1> <w2> ...           visit several wells in order
+    sweep <w1> <w2> ...          goto each + report predicted-vs-reached error (validate the fit)
     table                        show the teach table
 
     sethome                      zero the joints at the current pose (manual home)
@@ -40,6 +41,11 @@ Commands:
     save [path]                  persist the teach table to JSON
     home yes                     (CAUTION) run the limit-switch homing sequence
     quit
+
+Sibling tools (run from the shell as `python3 -m phil.<tool>`):
+    tiptrack                     live window of the converged tip over the plate;
+                                 jog + Enter to lock a well + f to fitkin (--simulate for a demo)
+    stepcheck                    flag mis-taught wells whose joints break the lattice
 """
 from __future__ import annotations
 
@@ -47,6 +53,7 @@ import argparse
 import sys
 
 from .robot import PhilRobot, PhilHandshakeError
+from .constants import DEFAULT_BACKEND
 
 
 def _jfmt(p: dict) -> str:
@@ -95,10 +102,22 @@ class PhilShell:
                 bot.set_travel_z(int(float(args[0])) if args else None)
             elif cmd == "scan":
                 bot.scan_wells(args, dwell_s=0.3)
+            elif cmd == "sweep":
+                if not args:
+                    print("usage: sweep <well> [well ...]   (e.g. sweep D6 E7 F7 H6 H12)")
+                else:
+                    self._sweep([w.upper() for w in args])
+            elif cmd == "tour":
+                # visit EVERY well in snake order, pausing at each so you can eyeball it
+                dwell = float(args[0]) if args else 5.0
+                self._tour(dwell)
             elif cmd == "table":
                 print(bot.teach_table.summary())
             elif cmd == "sethome":
                 bot.set_home()
+            elif cmd == "rehome":
+                # recovery: jog onto A1 first, then this restores the whole frame
+                bot.rehome()
             elif cmd in ("metric", "fit"):
                 if bot.kin_model and bot.kin_model.is_fitted:
                     print(bot.kin_model.summary())
@@ -107,6 +126,18 @@ class PhilShell:
                 print(bot.calibration.summary())
             elif cmd == "fitkin":
                 bot.fit_kinematics(n_starts=int(args[0]) if args else 400)
+            elif cmd == "gridcheck":
+                bot.grid_check(tol_mm=float(args[0]) if args else 1.5)
+            elif cmd == "gridloo":
+                rows = bot.teach_table.grid_loo(bot.plate)
+                if not rows:
+                    print("  gridloo: need >=4 taught wells to check.")
+                else:
+                    n = int(args[0]) if args else 8
+                    print("  grid leave-one-out vs the rigid JSON grid (worst first; "
+                          "large usteps = likely mis-taught / wrong-frame well):")
+                    for w, err in rows[:n]:
+                        print(f"    {w:4s}  {err:8.1f} usteps")
             elif cmd == "reanchor":
                 bot.reanchor(args[0] if args else None)   # default A1
             elif cmd == "anchor":
@@ -154,6 +185,65 @@ class PhilShell:
             print(f"error: {type(e).__name__}: {e}")
         return True
 
+    def _tour(self, dwell):
+        """Visit every well in snake order, pausing `dwell` s at each so you can confirm
+        by eye. Prints which well + how it resolved (taught vs kinematics). Ctrl-C stops."""
+        import time
+        from .jog_teach import _serpentine
+        bot = self.bot
+        order = _serpentine(bot.plate)
+        print(f"touring {len(order)} wells, {dwell}s each (snake order). Ctrl-C to stop.\n")
+        try:
+            for i, w in enumerate(order, 1):
+                _, src = bot._resolve_well(w)
+                bot.goto_well(w)
+                print(f"  [{i:2d}/{len(order)}] AT {w:4s} [{src}] — confirm ({dwell:.0f}s)")
+                time.sleep(dwell)
+            bot.goto_well("A1")
+            print("  tour done -> parked on A1.")
+        except KeyboardInterrupt:
+            print("\n  tour stopped.")
+
+    def _sweep(self, wells):
+        """Drive to each well and report the open-loop error: predicted joints (from
+        the model, or exact for a taught well) vs the joints actually reached, in
+        usteps AND true tip-mm (via the 5-bar forward map, since the joints are
+        rotary -- a ustep is not a fixed mm). This is the camera-free validation:
+        interior wells test the model; taught wells (~0) confirm goto replay. A
+        large or sign-flipping residual across wells is the mirror/sag tell."""
+        bot = self.bot
+        kin = bot.kin_model if (bot.kin_model and bot.kin_model.is_fitted) else None
+        if kin is None:
+            print("  (no fitted kinematics -- run fitkin first; tip-mm unavailable)")
+        print(f"  {'well':4s} {'predX':>7s} {'predY':>7s} {'reachX':>7s} {'reachY':>7s}"
+              f" {'dX':>6s} {'dY':>6s} {'tip_mm':>7s}")
+        rows = []
+        for w in wells:
+            try:
+                pred = bot.well_position(w)
+            except Exception as e:
+                print(f"  {w:4s}  (predict failed: {e})")
+                continue
+            bot.goto_well(w)
+            rx, ry = bot._read_joints_settled()
+            dx, dy = rx - pred["X"], ry - pred["Y"]
+            tip = ""
+            if kin is not None:
+                ep, er = kin.forward(pred["X"], pred["Y"]), kin.forward(rx, ry)
+                if ep is not None and er is not None:
+                    mm = float(((er[0] - ep[0]) ** 2 + (er[1] - ep[1]) ** 2) ** 0.5)
+                    tip = f"{mm:.2f}"
+                    rows.append((w, dx, dy, mm))
+            tag = " [taught]" if bot.teach_table.is_taught(w) else ""
+            print(f"  {w:4s} {pred['X']:7d} {pred['Y']:7d} {rx:7d} {ry:7d}"
+                  f" {dx:6d} {dy:6d} {tip:>7s}{tag}")
+        if rows:
+            mms = [r[3] for r in rows]
+            worst = max(rows, key=lambda r: r[3])
+            print(f"\n  tip error mm: mean {sum(mms) / len(mms):.2f}, "
+                  f"worst {worst[3]:.2f} @ {worst[0]}  "
+                  f"(target <~1 mm; >2 mm or dX/dY flipping sign across wells = check the model)")
+
     def repl(self):
         print("\nPhil arm shell. Type 'help' for commands, 'quit' to exit.")
         print(self.bot.teach_table.summary())
@@ -173,7 +263,7 @@ def main(argv=None):
     ap.add_argument("--simulate", action="store_true", help="no hardware; in-memory backend")
     ap.add_argument("--labware", default=None, help="path to labware JSON")
     ap.add_argument("--teach", default=None, help="path to teach-table JSON")
-    ap.add_argument("--backend", default="legacy",
+    ap.add_argument("--backend", default=DEFAULT_BACKEND,
                     choices=["legacy", "v2", "stock", "sim"])
     ap.add_argument("--version", default="Teensy", help="controller version")
     ap.add_argument("-c", "--command", action="append", default=[],

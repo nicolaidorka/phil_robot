@@ -3,22 +3,39 @@
 ## Layers (top to bottom)
 
 ```
-cli.py / jog_teach.py / selftest.py   user surfaces (entry points at root)
+cli.py  jog_teach.py  selftest.py  rehome.py  measure.py  drive.py   user surfaces (root)
         |
 PhilRobot (robot.py)              high-level: connect, jog, goto_well, teach, reanchor
         |        \
   well resolution  motion
         |              \
-geometry.kinematics   hardware.legacy_mc (LegacyMicrocontroller)
+geometry.kinematics   hardware.legacy_mc / hardware.v2_mc   (backend-selected driver)
 geometry.well_map / geometry.calibration    |
 geometry.teach / geometry.well_plate     Teensy firmware over USB serial
 ```
 
-Package layout: `robot.py` + `paths.py` + `constants.py` and the three entry points
-(`cli.py`, `jog_teach.py`, `selftest.py`) at the top; well->joint models in
-`geometry/` (well_plate, teach, calibration, kinematics, well_map); driver in
-`hardware/` (legacy_mc). All data-file paths resolve through `phil/paths.py` (so modules
-can live in subpackages while `config/` and `labware/` stay at the package root).
+Package layout: `robot.py` + `paths.py` + `constants.py` and the entry points at the
+top; well->joint models in `geometry/` (well_plate, teach, calibration, kinematics,
+well_map); drivers in `hardware/` (legacy_mc, v2_mc). All data-file paths resolve
+through `phil/paths.py` (so modules can live in subpackages while `config/` and
+`labware/` stay at the package root).
+
+**Entry points (each `python3 -m phil.<name>`):**
+
+| module | what it's for |
+|--------|---------------|
+| `cli.py`       | interactive shell: jog, teach, `goto`, `sweep`, `metric`, … (main surface) |
+| `jog_teach.py` | arrow-key teach console with auto-approach (`--all` walks every well) |
+| `drive.py`     | free arrow-key drive — just move the arm, **no teaching** |
+| `rehome.py`    | the ONE blessed recovery: jog onto true A1 centre → set home → confirm |
+| `measure.py`   | drive each well via the *model*, jog to true centre, record the offset |
+| `tiptrack.py`  | **live GUI**: a plate-grid window with a marker on the converged tip (`KinematicModel.forward`) that follows the arm as you jog — positioning becomes *observable* instead of blind; also teaches (Enter) / `fitkin` (`f`). Sim-safe (throwaway config). |
+| `stepcheck.py` | flags **mis-taught wells**: in joint space each taught well must differ from its grid-neighbours by a predictable (smoothly-varying) step delta; `--tol-mm` sets the flag threshold. Labware-specific. |
+| `selftest.py`  | connection + feedback + tiny-jog hardware check |
+
+Shared helper (not an entry point): **`viz.py`** — backend-agnostic matplotlib
+patch/collection helpers for the plate visualizations (`tiptrack`, the
+model-vs-grid overlay). Imports no `pyplot`, so callers pick the backend.
 
 ## The mechanism
 
@@ -37,14 +54,18 @@ Order of preference for a well's joint target:
 
 1. **Exact taught** (`teach.py` `TeachTable`) — the recorded joints for a well.
    **This always wins when present.** Measured ground truth beats any model.
-   The production strategy: teach the **boundary** (rows A–E and H, 72/96), which
-   brackets the only untaught wells — interior rows **F and G** — so step 2 only
-   ever *interpolates* them. `jog_teach --all` teaches more wells if wanted.
-2. **`KinematicModel`** (`kinematics.py`) — inverse kinematics of the 5-bar,
-   refit on all 72 taught wells. Used for the interior F/G wells: bracketed by
-   taught rows, it interpolates them (F6 verified ~0.5 mm). It *extrapolates*
-   poorly (the original ~10-well fit had edge LOO ≈ 1.5–4.3 mm) — column 1 is
-   still weak — which is exactly why the boundary is taught. Also the path for
+   The production *strategy* is to teach the **boundary** (rows A–E and H, 72/96)
+   so step 2 only ever *interpolates* the untaught interior (F/G). **⚠️ Current
+   state ≠ strategy: only 24/96 are taught in the v2 frame** (L-shape: row A +
+   col 1 + a few); the proven 72-well boundary teach is **pre-reflash and invalid
+   in v2** and hasn't been rebuilt — so step 2 below is doing heavy *extrapolation*
+   today. `jog_teach --all --v2` rebuilds it.
+2. **`KinematicModel`** (`kinematics.py`) — inverse kinematics of the 5-bar.
+   With the boundary taught it *interpolates* the interior (F6 verified ~0.5 mm);
+   **with only the current 24-well L-shape it *extrapolates* — corner LOO ≈ 12–13
+   mm.** It extrapolates poorly in general (the early ~10-well fit had edge LOO
+   1.5–4.3 mm), column 1 is the weak edge — which is why the boundary must be
+   taught. Also the path for
    any other labware (no taught wells yet).
 3. **`WellMap`** (`well_map.py`) — scipy RBF interpolation of taught wells.
    Sags in sparse regions.
@@ -64,13 +85,15 @@ Parameters (12), all lengths in plate-local mm, angles in radians:
 `Z = az·x + bz·y + cz`.
 
 - **Fit**: `scipy.least_squares` multistart (random restarts, two FK branches),
-  `soft_l1` loss then a `linear` polish. Fed the taught `(plate-mm ↔ joint)`
-  pairs. The two arms come out near-identical (proximal ~64 mm, distal ~145 mm,
-  pivots ~41 mm apart) — a real mechanism. **Current fit: all 72 taught
-  (boundary) wells, ~300 starts → RMS ≈ 0.42 mm in-sample.** (An early ~10-well
+  `soft_l1` loss then a `linear` polish, with a geometry soft-prior pulling links
+  toward 65/145 mm. Fed the taught `(plate-mm ↔ joint)` pairs. The two arms come
+  out near-real (proximal ~65/59 mm, distal ~141/149 mm). **Current fit (v2): the
+  24 taught wells → RMS ≈ 0.93 mm in-sample.** ⚠️ The often-quoted **all-72-wells,
+  RMS ≈ 0.42 mm fit was PRE-REFLASH** and is invalid in v2 units. (An early ~10-well
   fit hit RMS ≈ 0.2 mm but overfit — edge LOO ≈ 1.5–4.3 mm. Fitting the dense
-  boundary trades a little in-sample RMS for far better interior interpolation:
-  F6 verified ~0.5 mm.)
+  boundary trades a little in-sample RMS for far better interior interpolation —
+  F6 was verified ~0.5 mm **back then, on the 72-well legacy fit**; that no longer
+  holds under the current 24-well v2 fit.)
 - **Inverse** (`predict`): well mm → joints via two circle intersections
   (elbow = circle(base, l) ∩ circle(E, dist)), then `joint = (θ - o)/s`, with
   angle-wrap unwrapping into the plausible joint range.
@@ -96,7 +119,15 @@ The flashed Teensy runs an **older protocol** than the repo's
   using the echoed `cmd_id`.
 
 `LegacyMicrocontroller` mimics the subset of `Microcontroller` that PhilRobot
-uses, so PhilRobot is backend-agnostic (`backend="legacy"|"stock"|"sim"`).
+uses, so PhilRobot is backend-agnostic (`backend="legacy"|"v2"|"stock"|"sim"`).
+
+**`v2_mc.py`** drives the newer **microstep firmware** (the reflash effort — see
+[REFLASH-PROGRESS](REFLASH-PROGRESS.md), [V2-FIRMWARE-NOTES](V2-FIRMWARE-NOTES.md)).
+It reports/commands at a much finer scale than legacy (~175 counts/mm at the tip
+vs legacy ~5.5), so PhilRobot rescales every count-based tunable by
+`_ustep_scale` (32 for v2, 1 for legacy) to keep motion logic backend-agnostic.
+A saved frame records which scale it was written in (256 = v2, 8 = legacy) so a
+frame is never mis-read across firmware. v2 goto fixes: [V2-GOTO-FIXES](V2-GOTO-FIXES.md).
 
 ## Units
 
@@ -124,4 +155,9 @@ Switching plates = different JSON; the kinematics maps its mm → joints.
 | `phil_kinematics.json` | fitted 5-bar geometry | re-teach + `fitkin` (rare) |
 | `phil_teach.json`      | taught well joints   | teaching |
 | `phil_calibration.json`| affine reference pts | teaching |
-| `phil_frame.json`      | reanchor offset + last pose (power-cycle detect) | `goto`, `reanchor`, close |
+| `phil_frame.json`      | reanchor offset + last pose (power-cycle detect) + `ustep_scale` tag | `goto`, `reanchor`, close |
+| `phil_offsets.json`    | per-well model-vs-true offsets (diagnostic) | `measure` — created on first run; absent until then |
+
+The active `phil_teach.json` is also backed up under `config/_GOOD_BACKUP/`, and
+the pre-reflash **legacy-units** teach/kinematics live in `config/pre-reflash-backup/`
+(72 wells — **not** valid in the v2 frame; kept for reference only).

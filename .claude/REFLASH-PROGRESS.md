@@ -19,13 +19,14 @@ Only finer command resolution can. The octopi v2 firmware commands in **microste
 which removes that grid. Honest expected outcome: **3–5 mm → ~0.5–1 mm** (the
 open-loop backlash floor; no encoders).
 
-## HARDWARE — confirmed by eye/camera 2026-06-12 (do not re-verify)
+## HARDWARE — confirmed by eye 2026-06-12 (do not re-verify)
 - **Controller**: Squid/octopi **V4** main board (silkscreen "V4").
 - **MCU**: **Teensy 4.1** (processor marked `MIMXRT1062DVJ6B` = i.MX RT1062).
 - **Stepper driver**: **TMC2660C** (read `TMC2660C 2332 BCK27`) on plug-in modules.
 - **Motion controller**: **TMC4361A** (read `TMC4361ALA 2202A039K`).
 - **Motors**: Shinano Kenshi **SST43D1125** (NEMA-17 frame), lot `09520G`.
-- **Teensy USB serial**: `/dev/ttyACM0`, SN `16640550`, mfr "Teensyduino".
+- **Teensy USB serial**: SN `16640550`, mfr "Teensyduino" (was `/dev/ttyACM0` this
+  session — but the ACMx number is **not stable**; identify by SN, see CLAUDE.md).
 => The board is exactly what `octopi_firmware_v2/main_controller_teensy41` targets
    (`tmc4361A_tmc2660_config`). **v2 firmware is compatible.** Compile target = Teensy 4.1.
 
@@ -52,7 +53,6 @@ only the joystick on Serial5). Fixed frames, no delimiter:
       in the .ino (lines 8–13, currently `def_octopi_80120.h`).
 - [x] **`software/phil/hardware/v2_mc.py`** driver written (8/24/4-byte protocol, microstep
       commands, mirrors legacy_mc.py interface). Imports CRC + port-discovery from legacy_mc.
-- [x] Camera-guided inspection tooling → `.claude/tools/capframe.py`, `crop.py`.
 
 ## TODO (remaining)
 - [ ] Wire `backend="v2"` in `software/phil/robot.py` to construct `V2Microcontroller`.

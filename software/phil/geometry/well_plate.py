@@ -138,6 +138,16 @@ class WellPlate:
         w = self.well(well_id)
         return w.x, w.y
 
+    def nearest_well(self, x: float, y: float) -> tuple[str, float]:
+        """Well whose centre is closest to plate-local ``(x, y)`` mm, and the
+        distance to it (mm). Handy for "what is the outlet over right now"."""
+        best_id, best_d2 = "", float("inf")
+        for wid, w in self._wells.items():
+            d2 = (w.x - x) ** 2 + (w.y - y) ** 2
+            if d2 < best_d2:
+                best_id, best_d2 = wid, d2
+        return best_id, best_d2 ** 0.5
+
     def well_ids(self) -> list[str]:
         return list(self._wells.keys())
 

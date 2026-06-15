@@ -13,3 +13,17 @@ __pycache__/
 firmware/build/
 *.bak
 software/phil/config/*.bak
+
+# Local teach/frame recovery + cleanup backups (machine-specific, not shared)
+software/phil/config/*.backup
+software/phil/config/phil_teach.backup-*.json
+software/phil/config/*.precleanup-bak
+software/phil/config/_GOOD_BACKUP/
+software/phil/config/_OLD_pre_grid_*/
+
+# Generated analysis overlays
+software/*.png
+
+# tiptrack / wizard runtime data + logs (regenerated each run)
+software/phil/config/*.log
+software/phil/config/*.jsonl

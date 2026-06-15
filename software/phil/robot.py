@@ -141,7 +141,9 @@ class PhilRobot:
     def __init__(self, labware_path=None, calibration_path=None,
                  plate=None, calibration=None, simulate=False,
                  controller_version="Teensy", controller_sn=None,
-                 backend="legacy", teach_path=None):
+                 backend=None, teach_path=None):
+        if backend is None:
+            backend = C.DEFAULT_BACKEND
         self.plate = plate or WellPlate.load(labware_path)
         if calibration is not None:
             self.calibration = calibration
@@ -190,17 +192,27 @@ class PhilRobot:
         # SAME physical legs / run-up / tolerances. (1 for legacy & sim.)
         self._ustep_scale = 32 if self.backend == "v2" else 1
         if self._ustep_scale != 1:
+            import os as _os
             cls, s = type(self), self._ustep_scale
+            # Joint-space *distances* scale with the finer grid (legs, frame-drift guard):
             self.MOVE_CHUNK_USTEPS = cls.MOVE_CHUNK_USTEPS * s
-            self.APPROACH_PRE_USTEPS = cls.APPROACH_PRE_USTEPS * s
-            self.APPROACH_CONFIRM_TOL = cls.APPROACH_CONFIRM_TOL * s
-            self.APPROACH_OK_USTEPS = cls.APPROACH_OK_USTEPS * s
-            self.APPROACH_MAX_CORRECTION = cls.APPROACH_MAX_CORRECTION * s
             self.FRAME_RESET_THRESHOLD = cls.FRAME_RESET_THRESHOLD * s
+            # The ACCEPT band must stay TIGHT: microstepping CAN stop to ~a microstep, so
+            # inflating it ×32 (8 -> 256 ~ 1.1 mm) threw away the precision ("resolution
+            # not high enough"). ~48 usteps ~ 0.25 mm at the tip.
+            self.APPROACH_OK_USTEPS = int(_os.environ.get("PHIL_OK_USTEPS", "48"))
+            self.APPROACH_CONFIRM_TOL = self.APPROACH_OK_USTEPS
+            # Allow genuine multi-mm corrections; only reject clearly-wild packet reads.
+            self.APPROACH_MAX_CORRECTION = 1200
+            # Run-up: enough to clear backlash (~1 mm) + build momentum, but NOT the ~14 mm
+            # the ×32 scaling gave (that overshot OFF the plate at corner wells like A1).
+            self.APPROACH_PRE_USTEPS = int(_os.environ.get("PHIL_PRE_USTEPS", "500"))
+            self.APPROACH_CONFIRM_TIMEOUT = 8.0
             # v2 honors accel ramps at the (low) bring-up velocity, so a chunk leg
             # takes longer than the legacy fixed-profile 2.0 s settle budget.
             self.APPROACH_CONFIRM_TIMEOUT = 8.0
 
+        self._scale_mismatch = False
         if self.backend == "v2":
             self.frame_suspect = False
             # The saved phil_frame.json (affine correction + absolute last_x/y/z) is in the
@@ -212,13 +224,13 @@ class PhilRobot:
                 self.frame_correction = dict(IDENTITY_CORRECTION)
                 self._last_joints = None
                 self._last_z = None
-            # The on-disk 5-bar fit (phil_kinematics.json) and affine calibration
-            # (phil_calibration.json) are in LEGACY units -- no v2 kinematic fit exists
-            # yet -- so on v2 they would resolve UNTAUGHT wells ~32x too small (a big
-            # wrong move). Drop them so untaught wells fall to the v2-scale well_map /
-            # 4-corner bilinear built from the current teach table. Re-build with
-            # `fitkin` once enough v2 wells are taught.
-            self.kin_model = None
+            # KEEP the on-disk 5-bar fit ONLY if it was made at v2 (microstep) scale --
+            # a LEGACY-scale fit would resolve untaught wells ~32x too small (a big wrong
+            # move). A v2 fit (from `fitkin` on v2 teach data) is exactly what we want as
+            # the primary resolver. The affine calibration is legacy-scale -> drop it to
+            # the nominal fallback (kinematics is primary anyway).
+            if not (self.kin_model and self.kin_model.looks_v2()):
+                self.kin_model = None
             self.calibration = Calibration.nominal(self.plate)
             # Legacy-scale teach/kinematics data would be commanded as raw microsteps
             # (32x too small) -> wrong moves. If the loaded teach table isn't marked
@@ -234,6 +246,18 @@ class PhilRobot:
                 self.teach_table.ustep_scale = 256
                 self.kin_model = None
                 self.well_map = None
+        elif self.backend in ("legacy", "stock"):
+            # SYMMETRIC guard (mirror of the v2 block above). v2-scale data (ustep_scale==256,
+            # counts ~10^4) commanded on a legacy/stock backend is divided by 8 -> ~32x too
+            # small -> EVERY well off, GROWING with distance, while A1=(0,0) (the only
+            # scale-invariant point) looks correct. That false "A1 outlier" wasted hours.
+            if ((self.teach_table.ustep_scale or 8) == 256
+                    or (self.kin_model and self.kin_model.looks_v2())):
+                print(f"** SCALE MISMATCH: teach/kinematics data is v2 microstep-scale "
+                      f"(ustep_scale=256) but backend is '{self.backend}'. goto would run "
+                      f"~32x off (everything but A1). Use `--backend v2`, or restore "
+                      f"legacy-scale data. goto is DISABLED until resolved.")
+                self._scale_mismatch = True
 
         # Plate-derived corner wells for interpolation / affine anchor (A1/A12/H1/H12
         # for a 96, A1/A24/P1/P24 for a 384) -- not hardcoded to 96-well.
@@ -295,17 +319,38 @@ class PhilRobot:
                           f"restoring it (if the arm was hand-moved while off, `reanchor A1`).")
             self.mc.initialize_drivers()                  # make the drivers able to ramp (zeros counter)
             time.sleep(0.8)
+            self.connected = True                         # link is up; needed so the restore
+            #                                               confirm below can read joint_position()
             if self._last_joints is not None:             # restore the frame INITIALIZE just zeroed
                 self.mc.set_position_usteps(C.AXIS_X, self._last_joints[0])
                 self.mc.set_position_usteps(C.AXIS_Y, self._last_joints[1])
+                tgt = {"X": self._last_joints[0], "Y": self._last_joints[1]}
                 if self._last_z is not None:
                     self.mc.set_position_usteps(C.AXIS_Z, self._last_z)
-                time.sleep(0.05)
-            # def_phil.h ships a slow 4 mm/s bring-up profile; v2 applies vel/accel live.
-            self.mc.set_max_velocity_acceleration(C.AXIS_X, 12.0, 150.0)
-            self.mc.set_max_velocity_acceleration(C.AXIS_Y, 12.0, 150.0)
+                    tgt["Z"] = self._last_z
+                # CONFIRM the restore landed (same fire-and-forget SET_POSITION as set_home).
+                # An unconfirmed restore would leave a wrong counter for the whole session.
+                if not self._confirm_counter(tgt):
+                    self.frame_suspect = True
+                    print("  ** frame restore not confirmed — `reanchor A1` before any goto.")
+            # v2 HONORS vel/accel (legacy ignored it). On this 5-bar's inertia an
+            # aggressive profile SKIPS STEPS mid-move -> the counter lies and goto lands
+            # way off, taught wells included, worse as error accumulates. Keep it slow
+            # and gentle (near def_phil.h's 4 mm/s bring-up); speed up later only once
+            # goto is proven step-loss-free. Tunable via PHIL_VMAX / PHIL_AMAX env vars.
+            # NB: these "mm" are NOTIONAL -- def_phil.h's vmmToMicrosteps multiplies by
+            # ~12800 usteps/"mm", so vel=2.0 is ~25k usteps/s (the whole plate is ~14k
+            # usteps wide). accel matters MOST for step loss on a heavy arm (jerk at
+            # ramp start), so keep it low. Start gentle; raise via env once proven.
+            import os as _os
+            _vmax = float(_os.environ.get("PHIL_VMAX", "2.0"))
+            _amax = float(_os.environ.get("PHIL_AMAX", "10.0"))
+            self.mc.set_max_velocity_acceleration(C.AXIS_X, _vmax, _amax)
+            self.mc.set_max_velocity_acceleration(C.AXIS_Y, _vmax, _amax)
             self.mc.set_max_velocity_acceleration(C.AXIS_Z, 4.0, 40.0)
-            self.connected = True
+            self._v2_vmax, self._v2_amax = _vmax, _amax   # base cruise for coordinated moves
+            print(f"  [v2 motion profile: vel={_vmax} accel={_amax} "
+                  f"(slow to avoid step loss; set PHIL_VMAX/PHIL_AMAX to tune)]")
             print(f"PhilRobot connected (backend=v2, microstep; frame restored). "
                   f"{self.teach_table.summary()}")
             self._check_frame()
@@ -349,8 +394,8 @@ class PhilRobot:
         if self.mc is not None:
             try:
                 if self.connected and not self.simulate:
-                    j = self.joint_position()      # checkpoint last pose for frame detection
-                    self._last_joints = (j["X"], j["Y"]); self._last_z = j["Z"]
+                    mx, my, mz = self._settled_frame()   # settled read, not a single stale packet
+                    self._last_joints = (mx, my); self._last_z = mz
                     self._save_frame()
             except Exception:
                 pass
@@ -587,30 +632,91 @@ class PhilRobot:
     # band the whole way. Smaller = safer but slower.
     MOVE_CHUNK_USTEPS = 40
 
+    # Joint-space safety box, derived from the taught wells (+ margin). The firmware
+    # does NOT clamp absolute MOVETO targets, and _approach_joints pre-positions to
+    # NEGATIVE joints at a corner well -> the arm can rotate off the plate. We clamp
+    # every commanded joint to this box so a goto/run-up can never drive off-plate.
+    JOINT_BOUND_MARGIN = 0       # usteps allowed beyond the taught extent (0 = strict)
+
+    def _joint_bounds(self):
+        t = self.teach_table.taught
+        if len(t) < 4:
+            return {"X": (None, None), "Y": (None, None)}
+        # The clamp must match the targets goto ACTUALLY commands. A reanchor/
+        # frame_correction shifts every well, so the box has to be the extent of the
+        # CORRECTED taught positions -- not the raw ones. Using the raw box truncates a
+        # valid corrected target (e.g. H12 after a big reanchor) back into the old box,
+        # driving the arm to a bad/off-plate spot. Derive the box from corrected points.
+        fc = self.frame_correction or IDENTITY_CORRECTION
+        pts = [_apply_correction(fc, v["X"], v["Y"]) for v in t.values()]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        m = self.JOINT_BOUND_MARGIN
+        return {"X": (min(xs) - m, max(xs) + m), "Y": (min(ys) - m, max(ys) + m)}
+
+    def _clamp_joint(self, axis, v):
+        lo, hi = self._joint_bounds()[axis]
+        v = int(v)
+        if lo is not None and v < lo:
+            return lo
+        if hi is not None and v > hi:
+            return hi
+        return v
+
     def _move_joints_to(self, x=None, y=None, z=None, coordinated=True):
-        """Absolute joint move in usteps, broken into short coordinated legs so the
-        fixed-profile firmware never reaches the high speed where it loses steps."""
+        """Absolute joint move in usteps. On v2 the TMC4361A ramps a smooth accel/
+        decel profile, so we issue ONE continuous coordinated move (legacy chunking
+        forced ~11 stop/start jerk cycles per traverse -- each restart a chance for a
+        heavy 5-bar to skip steps). Legacy keeps the short-leg chunking it needs."""
         self._require()
         if x is not None or y is not None:
             cur = self.joint_position()
-            tx = int(x) if x is not None else cur["X"]
-            ty = int(y) if y is not None else cur["Y"]
-            x0, y0 = cur["X"], cur["Y"]
-            dist = max(abs(tx - x0), abs(ty - y0))
-            legs = max(1, -(-dist // self.MOVE_CHUNK_USTEPS))   # ceil division
-            for i in range(1, legs + 1):
-                ix = int(round(x0 + (tx - x0) * i / legs))
-                iy = int(round(y0 + (ty - y0) * i / legs))
-                self.mc.move_x_to_usteps(ix)
-                self.mc.move_y_to_usteps(iy)
-                self._wait()
-                # Confirm EACH leg lands before sending the next. The legacy driver
-                # only ACKs the last command, so without this the legs pile up into
-                # one fast move (defeating the speed limit) or get cut short -- the
-                # accepted-slop-seeds-the-next-move drift that grows over a session.
-                self._confirm_joints(x=ix, y=iy)
+            tx = self._clamp_joint("X", x) if x is not None else cur["X"]
+            ty = self._clamp_joint("Y", y) if y is not None else cur["Y"]
+            if self.backend == "v2":
+                self._coordinated_move_v2(cur["X"], cur["Y"], tx, ty)
+                self._confirm_joints(x=tx, y=ty)
+            else:
+                x0, y0 = cur["X"], cur["Y"]
+                dist = max(abs(tx - x0), abs(ty - y0))
+                legs = max(1, -(-dist // self.MOVE_CHUNK_USTEPS))   # ceil division
+                for i in range(1, legs + 1):
+                    ix = int(round(x0 + (tx - x0) * i / legs))
+                    iy = int(round(y0 + (ty - y0) * i / legs))
+                    self.mc.move_x_to_usteps(ix)
+                    self.mc.move_y_to_usteps(iy)
+                    self._wait()
+                    self._confirm_joints(x=ix, y=iy)
         if z is not None:
             self.mc.move_z_to_usteps(int(z)); self._wait()
+
+    def _coordinated_move_v2(self, x0, y0, tx, ty):
+        """Move both 5-bar arms so they REACH TARGET TOGETHER. With one fixed speed the
+        shorter-travel arm stops first and the other then drags the nozzle against it --
+        the two arms fight (strain, vibration, step-loss risk; confirmed on hardware).
+        Scale each arm's velocity by its travel fraction so they cruise in proportion and
+        arrive simultaneously, then restore the cruise profile."""
+        dxa, dya = abs(tx - x0), abs(ty - y0)
+        dmax = max(dxa, dya)
+        if dmax == 0:
+            return
+        if os.environ.get("PHIL_NOCOORD"):         # A/B test: original simultaneous-fire move
+            self.mc.move_x_to_usteps(tx); self.mc.move_y_to_usteps(ty); self._wait()
+            return
+        v0 = getattr(self, "_v2_vmax", 2.0)        # step-loss-safe cruise (PHIL_VMAX)
+        a0 = getattr(self, "_v2_amax", 10.0)
+        fx, fy = dxa / dmax, dya / dmax
+        if min(fx, fy) >= 0.9:                      # already balanced -> no rescale
+            self.mc.move_x_to_usteps(tx); self.mc.move_y_to_usteps(ty); self._wait()
+            return
+        vmin = 0.1                                  # keep a near-zero axis ramping, not stalled
+        vx, vy = max(vmin, v0 * fx), max(vmin, v0 * fy)
+        ax, ay = max(1.0, a0 * fx), max(1.0, a0 * fy)
+        self.mc.set_max_velocity_acceleration(C.AXIS_X, vx, ax); self._wait()
+        self.mc.set_max_velocity_acceleration(C.AXIS_Y, vy, ay); self._wait()
+        self.mc.move_x_to_usteps(tx); self.mc.move_y_to_usteps(ty); self._wait()
+        self.mc.set_max_velocity_acceleration(C.AXIS_X, v0, a0); self._wait()   # restore cruise
+        self.mc.set_max_velocity_acceleration(C.AXIS_Y, v0, a0); self._wait()
 
     # Final-approach tuning. Teaching reaches a well with small RELATIVE +X/+Y jogs
     # (Up/Right arrows); goto must finish the SAME way so the open-loop joints
@@ -667,9 +773,24 @@ class PhilRobot:
         firmware can't command finer; a big error gets the full correction while near
         target it's damped (so it neither chases noise nor rounds to a no-op); and a
         >MAX_CORRECTION 'error' is a bad read and is ignored so it can't fling the arm."""
-        x, y = int(x), int(y)
+        x, y = self._clamp_joint("X", x), self._clamp_joint("Y", y)
         sx, sy = approach
         pre = self.APPROACH_PRE_USTEPS
+
+        if self.backend == "v2":
+            # On v2 the position read-back follows the controller's commanded count and
+            # CANNOT see a physically skipped step, so a closed-loop "correction" chases
+            # a residual that is ~0 in count-space while re-driving the run-up each pass
+            # (more jerk, more off-plate exposure at corners). Do ONE clean directional
+            # approach: pre-position on the -X,-Y side (clamped in-bounds so a corner
+            # well can't run off the plate), then close in +X,+Y to fix the backlash
+            # state the same way the well was taught.
+            px = self._clamp_joint("X", x - sx * pre)
+            py = self._clamp_joint("Y", y - sy * pre)
+            self._move_joints_to(x=px, y=py)
+            self._move_joints_to(x=x, y=y)
+            return
+
         cx, cy = x, y
         for _ in range(self.APPROACH_MAX_ITERS):
             self._move_joints_to(x=cx - sx * pre, y=cy - sy * pre)  # pre-position on matching side
@@ -688,6 +809,40 @@ class PhilRobot:
             cx += int(round(a * ex)); cy += int(round(a * ey))
 
     # ------------------------------------------------------------- home/zero
+    def _confirm_counter(self, targets, tol=8, timeout=1.5):
+        """After a direct counter write (SET_POSITION, which is fire-and-forget on v2),
+        poll the live position until each axis reads within ``tol`` usteps of its target.
+
+        The v2 firmware streams position every ~10 ms regardless of motion, so a stale
+        pre-write packet clears quickly. Requires TWO consecutive matching reads (so one
+        coincidental stale packet can't false-confirm). Returns True if confirmed; on
+        timeout returns False and the caller MUST NOT persist the frame -- a silently
+        wrong frame is exactly the failure mode this eliminates."""
+        if self.backend != "v2":
+            return True
+        t0 = time.time()
+        hits = 0
+        while time.time() - t0 < timeout:
+            j = self.joint_position()
+            if all(abs(j[ax] - tv) <= tol for ax, tv in targets.items()):
+                hits += 1
+                if hits >= 2:
+                    return True
+            else:
+                hits = 0
+            time.sleep(0.03)
+        j = self.joint_position()
+        got = {a: j[a] for a in targets}
+        print(f"  ** counter write UNCONFIRMED: targets {targets}, read {got} "
+              f"(after {timeout:.1f}s).")
+        return False
+
+    def _settled_frame(self):
+        """(X, Y, Z) from a settled MEDIAN read -- for persisting the frame. A single
+        read can be a stale packet; saving that as the frame is what corrupted it."""
+        mx, my = self._read_joints_settled()
+        return mx, my, self.joint_position()["Z"]
+
     def set_home(self):
         """Zero the joints at the CURRENT pose (manual home reference), no motion.
 
@@ -702,7 +857,13 @@ class PhilRobot:
             self.mc.set_position_usteps(C.AXIS_X, 0)
             self.mc.set_position_usteps(C.AXIS_Y, 0)
             self.mc.set_position_usteps(C.AXIS_Z, 0)
-            time.sleep(0.05)
+            # SET_POSITION is fire-and-forget (no ACK); CONFIRM the counter actually
+            # reads ~0 before trusting/saving the frame. Without this, a stale pre-zero
+            # packet was being baked into phil_frame.json -> the whole frame drifted.
+            if not self._confirm_counter({"X": 0, "Y": 0, "Z": 0}):
+                print("  ** home NOT set (counter didn't confirm 0). Frame unchanged. "
+                      "Re-run; if it persists the controller link is dropping writes.")
+                return False
         else:
             # Legacy custom firmware zeroes the counters on RESET (no motion).
             self.mc.reset()
@@ -717,17 +878,39 @@ class PhilRobot:
         self.frame_suspect = False
         self._save_frame()
         print(f"home set at current pose; joints now {self.joint_position()}")
+        return True
+
+    def rehome(self):
+        """Recovery after suspected step-loss / a wild move. A1 is taught at exactly
+        (0,0), so zeroing the frame while physically centred on A1 restores the ENTIRE
+        taught frame -- every well is relative to that zero. No re-teach, ever.
+
+        REQUIRES the outlet to be physically centred on A1 first (jog there). This just
+        zeroes wherever it currently is, so on the wrong spot it makes things worse."""
+        self._require()
+        if self.set_home() is False:
+            print("  [rehome] FAILED — counter did not confirm 0; frame unchanged. Re-run.")
+            return self.joint_position()
+        print("  [rehome] frame zeroed at A1 -> all 24 taught wells restored. "
+              "Verify by eye with `goto A1`. (Only ever rehome while centred on A1.)")
+        return self.joint_position()
 
     # --------------------------------------------------------------- teaching
-    def teach_well(self, well_id: str):
+    def teach_well(self, well_id: str, finish=None):
         """Save current joints as this well, and feed the metric (affine) fit.
 
         Each taught well becomes both an exact replay point AND a reference for
         the plate-mm <-> joint affine map, so a few wells derive a metric system
         that also adapts to other labware via their JSON.
+
+        ``finish`` = (sx, sy): the direction the operator's LAST jog engaged each axis
+        (+1 Up/Right, -1 Down/Left). Stored so ``goto`` reproduces the SAME backlash
+        engagement and lands on the taught spot regardless of finish direction. Omit
+        for non-arrow-console teaches (cli/tiptrack) -> direction-agnostic, goto's
+        canonical +X,+Y close-in.
         """
         p = self.joint_position()
-        self.teach_table.teach(well_id, p["X"], p["Y"], p["Z"])
+        self.teach_table.teach(well_id, p["X"], p["Y"], p["Z"], finish=finish)
         # also record for the mm<->joint affine (the "metric system")
         self.calibration.add_reference(
             well_id, (p["X"], p["Y"], p["Z"]), plate=self.plate)
@@ -795,20 +978,28 @@ class PhilRobot:
         return (self.frame_correction["cx"], self.frame_correction["cy"])
 
     def _resolve_raw(self, well_id: str):
-        # A taught well is measured ground truth -> exact replay ALWAYS wins.
-        # (The 5-bar model overfits the ~10 taught wells and mis-places untaught
-        #  ones by up to ~4 mm at the edges, so a recorded well must beat it.)
+        # Taught = measured ground truth -> exact replay ALWAYS wins (the operator is the
+        # sensor; with no encoder we trust where they centered the well).
         if self.teach_table.is_taught(well_id):
             return self.teach_table.joint_for_well(well_id, self.plate), "taught"
-        # Not taught yet: fall back to the model so the arm still moves while you
-        # teach. Once every well is taught, nothing reaches these branches.
-        if self.kin_model and self.kin_model.is_fitted:
+        # PRIMARY untaught predictor: learn the well from the rigid even 9 mm JSON grid
+        # THROUGH the taught wells. This does NOT overfit like the 5-bar model (which put
+        # H12 ~50 mm off when fit on a mis-framed point) -- the 5-bar is RETIRED below.
+        g = self.teach_table.predict_grid(well_id, self.plate)
+        if g is not None:
+            return g, "grid"
+        # Fallbacks, only while the teach table is too small / collinear for a grid fit:
+        if self.well_map and self.well_map.is_fitted:
+            return self.well_map.predict(well_id), "curve-fit"
+        try:
+            return self.teach_table.joint_for_well(well_id, self.plate), "interpolated"
+        except KeyError:
+            pass
+        if self.kin_model and self.kin_model.is_fitted:    # 5-bar: dead-last, retired
             try:
                 return self.kin_model.predict(well_id, self.plate), "kinematics"
             except Exception:
                 pass
-        if self.well_map and self.well_map.is_fitted:
-            return self.well_map.predict(well_id), "curve-fit"
         if self.calibration.is_fitted and len(self.calibration.reference_points) >= 3:
             return self.predict_well(well_id), "metric-affine"
         return self.teach_table.joint_for_well(well_id, self.plate), "interpolated"
@@ -890,13 +1081,40 @@ class PhilRobot:
               f"`reanchor {well_id.upper()}`.")
         return self.joint_position()
 
-    def add_anchor(self, well_id: str):
+    def _well_grid_error_mm(self, well_id):
+        """How far a TAUGHT well's joints land off its nominal grid cell (mm), via the
+        5-bar forward map. None if untaught/unfitted. Used to refuse anchoring on a
+        corrupt (off-grid) well like A1."""
+        w = well_id.strip().upper()
+        t = self.teach_table.taught.get(w)
+        if not (t and self.kin_model and self.kin_model.is_fitted):
+            return None
+        E = self.kin_model.forward(t["X"], t["Y"])
+        if E is None:
+            return None
+        mx, my = self.plate.local_xy(w)
+        return float(((E[0] - mx) ** 2 + (E[1] - my) ** 2) ** 0.5)
+
+    def add_anchor(self, well_id: str, grid_tol_mm=1.5):
         """Capture ONE anchor: the live joints (you've jogged the outlet to center
         ``well_id``) vs the raw model prediction. Collect 4 corners, then fit_anchor().
+
+        REFUSES an off-grid well (e.g. a corrupt A1): anchoring there imports that well's
+        error into the whole frame -- the exact mistake that wasted hours. Anchor on a
+        `gridcheck`-clean well instead.
         """
         self._require()
-        if not (self.kin_model and self.kin_model.is_fitted):
-            raise RuntimeError("no kinematic model fitted; nothing to anchor to")
+        # A TAUGHT well is its own reference: _resolve_raw returns its taught joints,
+        # so no kinematic model is needed (the 5-bar is retired). Only an UNtaught well
+        # needs the model to predict where it should be.
+        if not self.teach_table.is_taught(well_id) and not (self.kin_model and self.kin_model.is_fitted):
+            raise RuntimeError("no kinematic model fitted; anchor on a TAUGHT well (e.g. A1)")
+        ge = self._well_grid_error_mm(well_id)
+        if ge is not None and ge > grid_tol_mm:
+            print(f"  ** REFUSED to anchor on {well_id.strip().upper()}: it is OFF-GRID by "
+                  f"{ge:.1f} mm (taught in a bad frame). Anchoring here would shift the whole "
+                  f"frame by that error. Run `gridcheck` and anchor on a clean well (e.g. H12/D6).")
+            return None
         raw, _ = self._resolve_raw(well_id)          # uncorrected model prediction
         now = self.joint_position()                  # measured live joints
         w = well_id.strip().upper()
@@ -985,43 +1203,115 @@ class PhilRobot:
         """
         well_id = well_id or self.ANCHOR_WELL
         self.clear_anchors()
-        self.add_anchor(well_id)
+        if self.add_anchor(well_id) is None:         # refused (off-grid well) -> abort
+            print("  reanchor aborted (anchor well is off-grid). Pick a gridcheck-clean well.")
+            return (0.0, 0.0)
         fc = self.fit_anchor()
         return (fc["cx"], fc["cy"])
 
-    def fit_kinematics(self, n_starts: int = 400):
-        """(Re)fit the 5-bar geometry from the taught wells and save it."""
+    def fit_kinematics(self, n_starts: int = 10, attempts: int = 3, good_rms: float = 1.0):
+        """(Re)fit the 5-bar geometry from the taught wells and save it.
+
+        The fit is non-convex (a 5-bar has near-degenerate local minima), so a single
+        random-seed multistart finds the true geometry only ~1/3 of the time -- a bad
+        draw shows up as an obviously large RMS. We try several seeds and keep the
+        lowest-RMS fit, stopping early once one is clearly good. The seeds are drawn
+        FRESH each call (not 0..N), so rerunning `fitkin` explores new basins instead
+        of repeating the same results. Taught RMS cleanly separates a converged fit
+        (~floor, sub-1.5 mm) from a stuck one (many mm)."""
         if KinematicModel is None:
             raise RuntimeError("scipy not available; cannot fit kinematics")
-        m = KinematicModel()
-        rms = m.fit(self.plate, self.teach_table, n_starts=n_starts)
+        import numpy as _np
+        seeds = _np.random.default_rng().integers(0, 2**31 - 1, size=max(1, attempts))
+        best = None
+        for i, seed in enumerate(seeds):
+            m = KinematicModel()
+            rms = m.fit(self.plate, self.teach_table, n_starts=n_starts, seed=int(seed))
+            tag = "" if best is None or rms < best[0] else " (kept previous)"
+            print(f"  fit attempt {i + 1}/{len(seeds)}: RMS {rms:.2f} mm{tag}")
+            if best is None or rms < best[0]:
+                best = (rms, m)
+            if best[0] <= good_rms:
+                break
+        rms, m = best
         m.save()
         self.kin_model = m
+        note = "" if rms <= 2.0 else "  [!] high RMS -- fit may be stuck; add taught wells or rerun"
         print(f"kinematics fitted & saved: RMS {rms:.2f} mm over "
-              f"{len(self.teach_table.taught)} wells")
+              f"{len(self.teach_table.taught)} wells{note}")
+        print("  " + m.summary())
+        self.grid_check()                # surface any off-grid (mis-taught) wells now
         return rms
+
+    def grid_check(self, tol_mm=1.5):
+        """The plate is a uniform grid, so each taught well's joints, mapped back to
+        plate-mm through the 5-bar forward model, must land on its nominal grid cell. A
+        well far off was taught in a bad/stale frame (its neighbours aren't equidistant).
+        This both validates a teach and confirms (when all pass) that any remaining goto
+        error is a pure frame translation -> one `reanchor` fixes it. Needs `fitkin`."""
+        if not (self.kin_model and self.kin_model.is_fitted):
+            print("grid_check: no fitted kinematics (run `fitkin` first).")
+            return []
+        rows = []
+        for w in sorted(self.teach_table.taught):
+            t = self.teach_table.taught[w]
+            E = self.kin_model.forward(t["X"], t["Y"])
+            if E is None:
+                rows.append((w, float("nan")))
+                continue
+            mx, my = self.plate.local_xy(w)
+            rows.append((w, float(((E[0] - mx) ** 2 + (E[1] - my) ** 2) ** 0.5)))
+        rows.sort(key=lambda r: -(r[1] if r[1] == r[1] else 1e9))
+        bad = [w for w, e in rows if not (e <= tol_mm)]
+        sp = self.plate.row_spacing_mm or 9.0
+        print(f"grid_check: taught joints -> plate-mm vs the uniform {sp:.0f}mm grid:")
+        for w, e in rows:
+            flag = "   <-- OFF GRID (re-teach this well)" if not (e <= tol_mm) else ""
+            print(f"  {w:4s} {e:5.2f} mm{flag}")
+        if bad:
+            print(f"  => {len(bad)} well(s) break the grid (taught in a bad frame): {bad}")
+        else:
+            print("  => all taught wells on the grid. Any uniform goto residual is a pure "
+                  "frame shift -> one `reanchor A1` removes it.")
+        return rows
 
     def goto_well(self, well_id: str, safe=True):
         """Move to a well: exact taught position, else derived from the metric map."""
         self._require()
+        if self._scale_mismatch:
+            raise RuntimeError(
+                "goto disabled: v2-scale teach data on a non-v2 backend (~32x off). "
+                "Use `--backend v2` or restore legacy-scale data.")
         if self.frame_suspect:
             print("  ** frame looks power-cycle-reset — `reanchor <well>` first or "
                   "this move will be off (geometry is fine, no re-teach).")
         tgt, taught = self._resolve_well(well_id)
+        # Replay the SAME backlash engagement the well was taught with: a well finished
+        # -X,-Y must be re-approached from the +side closing -X,-Y, NOT goto's default
+        # +X,+Y. Then the identical count lands on the identical physical spot despite
+        # the ~1-gap slop. Untaught (model) wells keep the canonical +X,+Y close-in.
+        if os.environ.get("PHIL_CANON"):           # A/B: ignore recorded finish, always +X,+Y
+            approach = (1, 1)
+        else:
+            approach = self.teach_table.finish_for_well(well_id) if taught == "taught" else (1, 1)
+        ann = "" if approach == (1, 1) else (
+            f"  (replay finish {'+' if approach[0] > 0 else '-'}X,"
+            f"{'+' if approach[1] > 0 else '-'}Y)")
         travel_z = self.teach_table.travel_z() if safe else None
-        print(f"goto {well_id.upper()} [{taught}] -> X={tgt['X']} Y={tgt['Y']} Z={tgt['Z']}")
+        print(f"goto {well_id.upper()} [{taught}] -> X={tgt['X']} Y={tgt['Y']} Z={tgt['Z']}{ann}")
         if travel_z is not None and self.teach_table.z_travel_usteps is not None:
             self._move_joints_to(z=travel_z)              # lift to safe travel height
-            self._approach_joints(tgt["X"], tgt["Y"])     # creep in like the teach jogs
+            self._approach_joints(tgt["X"], tgt["Y"], approach=approach)   # close in the taught way
             self._move_joints_to(z=tgt["Z"])              # descend to the well
         else:
             if safe and self.teach_table.z_travel_usteps is None:
                 print("  ** no travel-Z set (run `travelz <usteps>`); moving WITHOUT a "
                       "lift — risk of dragging the nozzle across the plate.")
-            self._approach_joints(tgt["X"], tgt["Y"])     # creep in like the teach jogs
+            self._approach_joints(tgt["X"], tgt["Y"], approach=approach)   # close in the taught way
             self._move_joints_to(z=tgt["Z"])              # set Z
-        self._last_joints = (tgt["X"], tgt["Y"]); self._last_z = tgt["Z"]   # frame checkpoint
-        self._save_frame(well=well_id)
+        mx, my, mz = self._settled_frame()   # SETTLED actual read, never the commanded target
+        self._last_joints = (mx, my); self._last_z = mz   # nor a single stale packet (both bake a
+        self._save_frame(well=well_id)                    # wrong frame in across reconnects)
         return self.joint_position()
 
     # --------------------------------------------- named (off-plate) positions
@@ -1070,7 +1360,8 @@ class PhilRobot:
                       "WITHOUT a lift — risk of hitting the plate wall. Set travel-Z first.")
             self._approach_joints(tgt["X"], tgt["Y"])
             self._move_joints_to(z=tgt["Z"])
-        self._last_joints = (tgt["X"], tgt["Y"]); self._last_z = tgt["Z"]
+        mx, my, mz = self._settled_frame()   # settled actual read, not commanded target
+        self._last_joints = (mx, my); self._last_z = mz
         self._save_frame()
         return self.joint_position()
 

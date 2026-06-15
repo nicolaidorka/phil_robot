@@ -42,9 +42,28 @@ class TeachTable:
         self.ustep_scale = ustep_scale
 
     # -------------------------------------------------------------- teaching
-    def teach(self, well_id, x, y, z):
-        self.taught[well_id.strip().upper()] = {
-            "X": int(round(x)), "Y": int(round(y)), "Z": int(round(z))}
+    def teach(self, well_id, x, y, z, finish=None):
+        """Record a well's joints. ``finish`` = (sx, sy), the per-axis direction the
+        operator's LAST nudge engaged (+1 = Up/Right, -1 = Down/Left). goto replays
+        the SAME engagement so the count and the physical spot agree despite backlash
+        (see finish_for_well). Omit it (None) to leave a well direction-agnostic; goto
+        then uses its canonical +X,+Y close-in."""
+        rec = {"X": int(round(x)), "Y": int(round(y)), "Z": int(round(z))}
+        if finish is not None:
+            sx, sy = finish
+            rec["finish"] = [1 if (sx is None or sx >= 0) else -1,
+                             1 if (sy is None or sy >= 0) else -1]
+        self.taught[well_id.strip().upper()] = rec
+
+    def finish_for_well(self, well_id) -> tuple:
+        """The backlash finish direction goto must replay for this well, (sx, sy).
+        Defaults to (+1, +1) for wells taught before finish was recorded -- i.e. goto's
+        original canonical +X,+Y close-in, so nothing regresses."""
+        rec = self.taught.get(well_id.strip().upper())
+        if rec and "finish" in rec:
+            fx, fy = rec["finish"]
+            return (1 if fx >= 0 else -1, 1 if fy >= 0 else -1)
+        return (1, 1)
 
     def forget(self, well_id):
         self.taught.pop(well_id.strip().upper(), None)
@@ -95,6 +114,108 @@ class TeachTable:
                 (1 - u) * (1 - v) * a1[axis] + u * (1 - v) * a12[axis]
                 + (1 - u) * v * h1[axis] + u * v * h12[axis]))
         return out
+
+    # ------------------------------------------------ rigid-grid learning
+    def predict_grid(self, well_id, plate, max_order=2) -> dict | None:
+        """Learn an UNTAUGHT well's joints from ALL taught wells + the rigid even JSON
+        grid -- NOT the 5-bar model (which overfits and put H12 ~50 mm off). The plate
+        is an even lattice, so the (col,row) indices ARE the metric coordinate; fit a
+        low-order least-squares polynomial surface q=f(col,row) per axis (X/Y/Z) through
+        every taught well and evaluate at the target.
+
+        Adaptive by COUNT and SPREAD: include a `c`/`r` term only if that coordinate
+        actually varies across the taught wells (the collinear/L-shape guard -- an
+        all-row-A teach gets no row slope, so off-line predictions fall back to the
+        constant instead of a rank-deficient garbage slope); add the bilinear `c*r`
+        cross-term at n>=4 (both vary). CAPPED at bilinear (the natural rigid-grid
+        interpolant) -- a biquadratic over a sparse scattered teach mis-extrapolates
+        corner wells by ~50k usteps. Each solve is column-scaled + conditioning-checked;
+        if ill-conditioned it drops one order and refits, down to affine. Returns None if
+        <3 wells or still degenerate -- so a SINGLE taught well is never predicted here and
+        instead exact-replays via the taught branch. numpy-only.
+        """
+        import numpy as np
+        wells = list(self.taught)
+        if len(wells) < 3:
+            return None
+        cr = np.array([plate.parse_well_id(w)[::-1] for w in wells], float)  # (col,row)
+        c, r = cr[:, 0], cr[:, 1]
+        c_var = float(c.max() - c.min()) > 1e-9
+        r_var = float(r.max() - r.min()) > 1e-9
+        if not (c_var or r_var):
+            return None                                      # all taught wells one cell
+        n = len(wells)
+        # CENTER the grid coords before fitting: the raw (col,row,c*r) basis with col up
+        # to 11 is badly conditioned, and lstsq then mis-extrapolates at the edges (it put
+        # corner wells ~50k usteps off). Centering fixes the conditioning.
+        c0, r0 = float(c.mean()), float(r.mean())
+        cs, rs = c - c0, r - r0
+        tc, tr = plate.parse_well_id(well_id.strip().upper())[::-1]
+        tcs, trs = float(tc) - c0, float(tr) - r0
+        terms = {"1": (np.ones(n), 1.0), "c": (cs, tcs), "r": (rs, trs),
+                 "cr": (cs * rs, tcs * trs)}
+
+        def basis(order):
+            names = ["1"]
+            if c_var:
+                names.append("c")
+            if r_var:
+                names.append("r")
+            if order >= 2 and c_var and r_var and n >= 4:
+                names.append("cr")            # bilinear -- the natural rigid-grid interpolant
+            return names
+
+        target_order = min(max_order, 2 if n >= 4 else 1)
+        for order in range(target_order, 0, -1):
+            names = basis(order)
+            Phi = np.column_stack([terms[k][0] for k in names])
+            if Phi.shape[0] < Phi.shape[1]:
+                continue
+            # Column-scale, then SOLVE on the scaled matrix (not just condition-check it):
+            # solving the unscaled basis lets lstsq's rcond drop a singular value and pick
+            # a curved solution that mis-extrapolates corner wells by ~50k usteps. Scaling
+            # both the fit and the rank/condition test keeps it well-posed; drop to a lower
+            # order if even scaled it's ill-conditioned (collinear taught set).
+            norms = np.linalg.norm(Phi, axis=0); norms[norms == 0] = 1.0
+            Phin = Phi / norms
+            sv = np.linalg.svd(Phin, compute_uv=False)
+            if sv[-1] <= 1e-6 * sv[0]:
+                continue
+            xs = np.array([terms[k][1] for k in names], float) / norms
+            out = {}
+            for axis in ("X", "Y", "Z"):
+                q = np.array([self.taught[w][axis] for w in wells], float)
+                beta, *_ = np.linalg.lstsq(Phin, q, rcond=None)
+                out[axis] = int(round(float(xs @ beta)))
+            return out
+        return None
+
+    def grid_loo(self, plate) -> list:
+        """Leave-one-out grid residual (XY usteps) per taught well, worst first. Hold a
+        well out, predict it from the OTHERS via predict_grid, compare to its taught
+        joints. A large residual = a likely MIS-TAUGHT well (the ~50 mm H12 would scream).
+        numpy-only, no kin model. Needs >=4 wells (>=3 must remain after holding one out).
+        Uses an AFFINE (max_order=1) fit: a bilinear cr-twist extrapolates held-out CORNER
+        wells and would flag them as false positives; affine is exact on the rigid grid at
+        corners, so only a genuinely off-grid well stands out.
+        """
+        import numpy as np
+        wells = list(self.taught)
+        if len(wells) < 4:
+            return []
+        full = dict(self.taught)
+        out = []
+        try:
+            for w in wells:
+                self.taught = {k: v for k, v in full.items() if k != w}
+                pred = self.predict_grid(w, plate, max_order=1)
+                if pred is None:
+                    continue
+                err = float(np.hypot(pred["X"] - full[w]["X"], pred["Y"] - full[w]["Y"]))
+                out.append((w, round(err, 1)))
+        finally:
+            self.taught = full
+        return sorted(out, key=lambda t: -t[1])
 
     # --------------------------------------------------------------- travel
     def travel_z(self, plate=None) -> int | None:

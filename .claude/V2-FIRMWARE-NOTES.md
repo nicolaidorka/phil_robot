@@ -58,7 +58,10 @@ forces POSITION mode). `set_home` on v2 also routes through SET_POSITION for the
 - X/Y ≈ **170–227 microsteps/mm at the tip** (varies with the 5-bar Jacobian; right/high columns
   move ~5 mm per legacy full-step, col-1 region ~2 mm — col-1 is the most precise region).
 - **Axis map** (def_phil.h): `x=1, y=0, z=2` (X/Y swapped vs natural). Verified by jog; X command
-  drives channel 1 consistently (set/read/move all agree).
+  drives channel 1 consistently (set/read/move all agree). NB: this is the **low-level firmware
+  channel** mapping, handled inside the driver — it does **not** change the user-facing convention
+  (logical **X = left arm, Y = right arm**) that CLAUDE.md/ARCHITECTURE.md use; jog/teach/goto all
+  speak the logical axes.
 - Motor current: X/Y **560 mA**, Z **300 mA** (TMC2660 current-scale ≥16). Motors: Shinano SST43D1125 NEMA-17.
 - No motion on connect; `SET_POSITION` changes the counter without moving the arm (verified).
 
@@ -76,6 +79,10 @@ forces POSITION mode). `set_home` on v2 also routes through SET_POSITION for the
 - 4 corners + bilinear/RBF interpolation → a few mm mid-plate. For **reliable** well-hitting,
   teach the BOUNDARY (rows A–E + H), refit, interpolate F/G (the original strategy). 96-well
   (9 mm pitch) is forgiving; 384-well (4.5 mm) needs the boundary teach + the ~1 mm floor to hold.
+- **Current v2 state (2026-06-13): only 24/96 taught** (an L-shape: row A + col 1 + a few) —
+  the boundary teach above is **NOT yet redone in v2**, so untaught wells extrapolate (corner
+  LOO ≈ 12–13 mm). This is the open work to "know the wells." See
+  [UNITS-AND-CALIBRATION](UNITS-AND-CALIBRATION.md) and the main [CLAUDE.md](CLAUDE.md) Goal/Status.
 - Always close in from a FIXED direction (the `_approach_joints` run-up) for repeatable backlash.
 
 ## Operational gotchas

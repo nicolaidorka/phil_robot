@@ -10,8 +10,11 @@ non-obvious things that cost the most time; read before debugging.
   rows *and* columns), so single-motor jogs don't trace plate rows/columns.
 
 ## Controllers on USB
-- `/dev/ttyACM1` = Teensy (Teensyduino, sn 16640550) → **this is Phil**.
-- `/dev/ttyACM0` = Opentrons Flex → **unrelated**, ignore it.
+- Teensy (Teensyduino, **sn 16640550**) → **this is Phil**; an Opentrons Flex is
+  the other device → **unrelated, ignore it**.
+- ⚠️ The `/dev/ttyACMx` **number is NOT stable** — Phil has enumerated as both
+  ACM1 (here) and ACM0 (see REFLASH-PROGRESS). **Identify by SN/mfr, never the
+  number** (the code auto-detects this way). See CLAUDE.md → "How to connect".
 
 ## Firmware protocol mismatch (the big one)
 - The repo's `control/microcontroller.py` assumes **8-byte commands / 24-byte
@@ -84,6 +87,14 @@ non-obvious things that cost the most time; read before debugging.
    (the far edge) is still weak** — even bracketed, the edge column is the
    shakiest; teach those wells (or accept ~1 mm) if it matters.
 
+   > ⚠️ **STATUS (2026-06-13): the 72-well boundary above was achieved on the
+   > LEGACY firmware and lost to the microstep reflash** (its joint counts are in
+   > legacy units, invalid in v2). It lives in `config/pre-reflash-backup/` but is
+   > NOT loaded. The live v2 teach is only **24/96** (an L-shape), so today the
+   > model is *extrapolating* (corner LOO ≈ 12–13 mm), exactly the failure mode
+   > this step was meant to cure. **The boundary teach must be redone in v2**
+   > (`jog_teach --all --v2` → `fitkin`) to restore the result described here.
+
 ## Precision ceiling
 - ~1–2 mm, set by open-loop steppers + backlash. A taught well replays its exact
   joints but still lands within backlash of where it was taught — that's the
@@ -110,6 +121,19 @@ non-obvious things that cost the most time; read before debugging.
   uniform approach visibly changed where the arm landed. So the idea isn't dead,
   just mis-applied.
 
+### Anti-backlash, DONE RIGHT — per-well finish replay (IMPLEMENTED 2026-06-13)
+- **The working fix:** record each well's finish direction at teach time and have
+  `goto` replay THAT per-well direction — not one global direction. `jog_teach`
+  passes `last_dir` → `teach_well(finish=(sx,sy))` → `TeachTable` stores `"finish"`;
+  `goto_well` reads `finish_for_well()` and passes `approach=` to `_approach_joints`.
+- **Why it works where the uniform fix failed:** snake-taught wells finish in
+  different directions, so the correct engagement is **per-well**; replaying each
+  well's own finish matches it regardless of row order. Backward-compatible: wells
+  with no recorded finish default to +X,+Y (old behaviour) — re-teach to capture it.
+- **No tip motion at record, no jog-feel change** (unlike the 2026-06-11 "seated
+  jogging" clamp, which broke jogging and corrupted H12 — see LEARNINGS). Verified
+  in sim; confirm on hardware by eye. Residual = ~1 mm backlash floor.
+
 ### Ideas not yet tried (next levers, in rough order of promise)
 0. **Mimic the teach motion (lead candidate).** Teaching nudges with **relative**
    jogs (`MOVE_X`, small steps `[8,16,32,64,120]` usteps) and the recorded count
@@ -128,7 +152,7 @@ non-obvious things that cost the most time; read before debugging.
    **record the actual final approach direction per well at teach time** and
    replay it. This *cancels* backlash instead of fighting it.
 2. **Characterize the motion empirically ("learn how we move them"):** measure
-   commanded-vs-physical offset per joint per direction (by eye/camera over a
+   commanded-vs-physical offset per joint per direction (by eye over a
    grid), build a small per-direction backlash-correction lookup, and apply it
    in `goto`. Turns the hand-wavy ~1 mm into a measured, compensable model.
 3. **Smoother motion / settle:** slower final-leg velocity or a short settle
@@ -139,5 +163,5 @@ non-obvious things that cost the most time; read before debugging.
    (closes the loop, kills backlash). Both are bigger projects.
 - NOTE for evaluating any future fix: the firmware **readback is not
   trustworthy** at ustep resolution (quantized to 8 usteps, direction-biased,
-  sampled before settle). Judge by **eye/camera on the well**, never by the
+  sampled before settle). Judge by **eye on the well**, never by the
   reported joints.

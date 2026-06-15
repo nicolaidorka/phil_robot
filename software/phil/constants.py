@@ -10,6 +10,19 @@ If you change the stepper/leadscrew configuration in ``_def.py``, update
 these to match.
 """
 
+# --- which firmware is on the Teensy (SINGLE SOURCE OF TRUTH) ---------------
+# The board was reflashed to the octopi v2 microstep firmware (2026-06-13,
+# "FLASHED + WORKING" — see .claude/REFLASH-PROGRESS.md). The saved teach /
+# kinematics data is v2-scale (ustep_scale=256). So the default driver MUST be
+# "v2"; the old "legacy" 6/20-byte driver mis-frames the v2 status stream
+# (reads garbage positions) and the scale guard disables goto.
+#
+# EVERY entry point (cli, jog_teach, rehome, measure, drive, tiptrack, the
+# PhilRobot constructor) reads THIS constant so there is exactly one place to
+# change. If the firmware is ever rolled back to legacy, flip this to "legacy"
+# (or pass --legacy / --backend legacy at any entry point as an override).
+DEFAULT_BACKEND = "v2"
+
 # --- axis identifiers (match control._def.AXIS) -----------------------------
 AXIS_X = 0
 AXIS_Y = 1
