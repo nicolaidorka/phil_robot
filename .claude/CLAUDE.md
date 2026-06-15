@@ -1,5 +1,9 @@
 # CLAUDE.md — Phil robot
 
+> **Day-to-day use** (connect, `goto`, recover a bump, fresh-machine setup, the open
+> items) lives in [`../OPERATING.md`](../OPERATING.md) — read that first for "how to
+> use it now"; this file is the overview + code map.
+
 > ## ‼️ READ FIRST, EVERY SESSION
 > Before changing anything, **read [RULES](RULES.md) and [LEARNINGS](LEARNINGS.md)** —
 > they hold hard operating rules and every past failure/complaint so you don't repeat
