@@ -976,7 +976,8 @@ class PhilRobot:
         return self._resolve_well(well_id)[0]
 
     def _resolve_well(self, well_id: str):
-        """Joint target: exact taught > 5-bar kinematics > RBF curve-fit > affine.
+        """Joint target: exact taught > rigid-grid predictor > RBF curve-fit > affine
+        (the 5-bar kinematics is retired to dead-last -- it overfit/extrapolated badly).
 
         The persisted joint-frame correction (from reanchor/anchor) has two roles
         that apply to different wells:

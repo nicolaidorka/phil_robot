@@ -116,12 +116,23 @@ class TeachTable:
         return out
 
     # ------------------------------------------------ rigid-grid learning
-    def predict_grid(self, well_id, plate, max_order=2) -> dict | None:
-        """Learn an UNTAUGHT well's joints from ALL taught wells + the rigid even JSON
+    def predict_grid(self, well_id, plate, max_order=2, local=True) -> dict | None:
+        """Learn an UNTAUGHT well's joints from the taught wells + the rigid even JSON
         grid -- NOT the 5-bar model (which overfits and put H12 ~50 mm off). The plate
         is an even lattice, so the (col,row) indices ARE the metric coordinate; fit a
         low-order least-squares polynomial surface q=f(col,row) per axis (X/Y/Z) through
-        every taught well and evaluate at the target.
+        the taught wells and evaluate at the target.
+
+        ``local`` (default) = LOCALLY-WEIGHTED fit: each taught well is weighted by
+        1/(dist^2 + 1) in (col,row) cells from the TARGET, so the prediction leans on the
+        NEARBY taught wells (the rigid-grid "derive usteps/mm from neighbours" idea) and
+        captures the 5-bar's nonlinearity patch-by-patch instead of forcing one global
+        plane over the whole plate. Measured on the 8-well L+corners teach this pulls the
+        interior leave-one-out from ~3.0 mm (global) to ~1.9 mm -- at the ~1-2 mm hardware
+        floor. The eps=1 cell keeps it well-posed in SPARSE regions and makes it degrade
+        smoothly toward the global fit when the nearest anchors are far. Pass local=False
+        for an unweighted GLOBAL affine (grid_loo uses this -- a weighted fit makes
+        held-out CORNER residuals blow up and flag false mis-taught positives).
 
         Adaptive by COUNT and SPREAD: include a `c`/`r` term only if that coordinate
         actually varies across the taught wells (the collinear/L-shape guard -- an
@@ -129,10 +140,10 @@ class TeachTable:
         constant instead of a rank-deficient garbage slope); add the bilinear `c*r`
         cross-term at n>=4 (both vary). CAPPED at bilinear (the natural rigid-grid
         interpolant) -- a biquadratic over a sparse scattered teach mis-extrapolates
-        corner wells by ~50k usteps. Each solve is column-scaled + conditioning-checked;
-        if ill-conditioned it drops one order and refits, down to affine. Returns None if
-        <3 wells or still degenerate -- so a SINGLE taught well is never predicted here and
-        instead exact-replays via the taught branch. numpy-only.
+        corner wells by ~50k usteps. Each solve is column-scaled + conditioning-checked
+        on the WEIGHTED matrix; if ill-conditioned it drops one order and refits, down to
+        affine. Returns None if <3 wells or still degenerate -- so a SINGLE taught well is
+        never predicted here and instead exact-replays via the taught branch. numpy-only.
         """
         import numpy as np
         wells = list(self.taught)
@@ -147,13 +158,22 @@ class TeachTable:
         n = len(wells)
         # CENTER the grid coords before fitting: the raw (col,row,c*r) basis with col up
         # to 11 is badly conditioned, and lstsq then mis-extrapolates at the edges (it put
-        # corner wells ~50k usteps off). Centering fixes the conditioning.
+        # corner wells ~50k usteps off). Centering fixes the conditioning. (Centering is
+        # cosmetic for the prediction -- an affine fit's value at the target is the same
+        # however the basis is centered -- it only buys conditioning.)
         c0, r0 = float(c.mean()), float(r.mean())
         cs, rs = c - c0, r - r0
         tc, tr = plate.parse_well_id(well_id.strip().upper())[::-1]
         tcs, trs = float(tc) - c0, float(tr) - r0
         terms = {"1": (np.ones(n), 1.0), "c": (cs, tcs), "r": (rs, trs),
                  "cr": (cs * rs, tcs * trs)}
+        # Local distance weights (sqrt, to fold into the least-squares rows): lean on the
+        # taught wells nearest the TARGET. local=False -> uniform weights = global affine.
+        if local:
+            d2 = (c - float(tc)) ** 2 + (r - float(tr)) ** 2
+            sw = 1.0 / np.sqrt(d2 + 1.0)
+        else:
+            sw = np.ones(n)
 
         def basis(order):
             names = ["1"]
@@ -171,21 +191,22 @@ class TeachTable:
             Phi = np.column_stack([terms[k][0] for k in names])
             if Phi.shape[0] < Phi.shape[1]:
                 continue
-            # Column-scale, then SOLVE on the scaled matrix (not just condition-check it):
-            # solving the unscaled basis lets lstsq's rcond drop a singular value and pick
-            # a curved solution that mis-extrapolates corner wells by ~50k usteps. Scaling
-            # both the fit and the rank/condition test keeps it well-posed; drop to a lower
-            # order if even scaled it's ill-conditioned (collinear taught set).
+            # Column-scale, then SOLVE on the scaled+weighted matrix (not just condition-
+            # check it): solving the unscaled basis lets lstsq's rcond drop a singular value
+            # and pick a curved solution that mis-extrapolates corner wells by ~50k usteps.
+            # Scaling + checking the conditioning of the WEIGHTED matrix keeps it well-posed;
+            # drop to a lower order if even then it's ill-conditioned (collinear taught set).
             norms = np.linalg.norm(Phi, axis=0); norms[norms == 0] = 1.0
             Phin = Phi / norms
-            sv = np.linalg.svd(Phin, compute_uv=False)
+            Phiw = Phin * sw[:, None]              # row-weighted (local) design matrix
+            sv = np.linalg.svd(Phiw, compute_uv=False)
             if sv[-1] <= 1e-6 * sv[0]:
                 continue
             xs = np.array([terms[k][1] for k in names], float) / norms
             out = {}
             for axis in ("X", "Y", "Z"):
                 q = np.array([self.taught[w][axis] for w in wells], float)
-                beta, *_ = np.linalg.lstsq(Phin, q, rcond=None)
+                beta, *_ = np.linalg.lstsq(Phiw, q * sw, rcond=None)
                 out[axis] = int(round(float(xs @ beta)))
             return out
         return None
@@ -208,7 +229,7 @@ class TeachTable:
         try:
             for w in wells:
                 self.taught = {k: v for k, v in full.items() if k != w}
-                pred = self.predict_grid(w, plate, max_order=1)
+                pred = self.predict_grid(w, plate, max_order=1, local=False)
                 if pred is None:
                     continue
                 err = float(np.hypot(pred["X"] - full[w]["X"], pred["Y"] - full[w]["Y"]))

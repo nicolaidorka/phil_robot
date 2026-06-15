@@ -15,6 +15,17 @@ background is in [FINDINGS](FINDINGS.md); operating rules in [RULES](RULES.md).
   `udevadm info /dev/ttyACMx | grep SERIAL`.
 - Port busy → another `phil` process still holds it; close it.
 
+**USB light blinks, arrow keys/jogs freeze then "arrive all at once," port flips ACM0↔ACM1.**
+- **EMI** from the stepper motors radiating into the USB cable. `dmesg` shows
+  `usb usb1-port2: disabled by hub (EMI?) … USB disconnect … new high-speed USB device`
+  (the Teensy re-enumerating). The serial link drops mid-jog so keypresses queue in the terminal,
+  then flush at once when it reconnects.
+- A USB re-enumerate does **NOT** reset the MCU → the joint counter/frame survives (and the connect
+  snap-skip preserves it on reconnect); only the Python session breaks, so just restart.
+- Fix (hardware): clip a **ferrite choke** on the USB cable near the Teensy; **route the USB cable
+  away from motor/power wires** (cross at right angles, keep them apart); use a short shielded cable;
+  try a different port; avoid hubs.
+
 **Every command returns `CMD_CHECKSUM_ERROR` (status byte 2), then exits.**
 - You're on the **stock** backend. This Teensy runs the **older 6/20-byte
   protocol**, not the repo's 8/24. Fix: `backend="legacy"` (the CLI default).

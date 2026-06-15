@@ -297,12 +297,31 @@ def main(argv=None):
             shell.do(c)
         shell.repl()
     finally:
-        # HABIT: park on the anchor well (A1) when done, so next start is verified
+        # HABIT: park on the anchor well (A1) when done, so next start is verified.
+        # WATCHDOG: an EMI USB drop can make this move grind through long per-command
+        # timeouts (move_timeout_s) -- minutes that read as "the CLI won't quit" (hit live
+        # 2026-06-15). Run the park in a daemon thread and bound it; if it overruns, skip
+        # and close anyway. The MCU keeps the frame, so a skipped park costs nothing but
+        # the next-start A1 re-check.
         try:
             if do_check and bot.connected and not bot.frame_suspect:
                 print(f"[shutdown] parking on {bot.ANCHOR_WELL} (anchor) "
                       "and saving position...")
-                bot.goto_well(bot.ANCHOR_WELL)
+                import threading
+                done = threading.Event()
+
+                def _park():
+                    try:
+                        bot.goto_well(bot.ANCHOR_WELL)
+                    except Exception:
+                        pass
+                    finally:
+                        done.set()
+
+                threading.Thread(target=_park, daemon=True).start()
+                if not done.wait(timeout=15):
+                    print("[shutdown] park timed out (USB link dropped?) — skipping; "
+                          "frame is preserved, just re-check A1 next start.")
         except Exception:
             pass
         bot.close()

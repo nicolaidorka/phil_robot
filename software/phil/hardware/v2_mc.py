@@ -34,6 +34,8 @@ the legacy calibration in config/pre-reflash-backup/ does NOT carry over.
 """
 from __future__ import annotations
 
+import fcntl
+import os
 import threading
 import time
 
@@ -81,6 +83,23 @@ class V2Microcontroller:
         if self.port is None:
             raise IOError("no Teensy/Arduino controller found")
         self.serial = serial.Serial(self.port, 2000000, timeout=1)
+        # Single-instance guard: take an exclusive advisory lock on the port so a SECOND
+        # phil program can't open the same /dev/ttyACM. Two opens interleave their bytes
+        # into garbage move commands and can JAM the arm (hit live 2026-06-15). The lock is
+        # tied to this fd -> released automatically on close()/process exit (no stale
+        # lockfile). Set PHIL_NO_PORT_LOCK=1 to bypass (deliberate multi-tool debugging).
+        if not os.environ.get("PHIL_NO_PORT_LOCK"):
+            try:
+                fcntl.flock(self.serial.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                self.serial.close()
+                raise IOError(
+                    f"{self.port} is already in use by another Phil program — quit the "
+                    f"other CLI / drive / jog_teach first. Two programs on one serial port "
+                    f"send the firmware garbage and can jam the arm.")
+        # set True if the USB link drops mid-session (EMI) so waiters fail fast instead of
+        # burning the full move timeout on every command (~20s each -> minutes of "hang").
+        self.link_dead = False
         time.sleep(0.2)
 
         self._cmd_id = 0
@@ -101,6 +120,7 @@ class V2Microcontroller:
             try:
                 chunk = self.serial.read(MSG_LENGTH)
             except Exception:
+                self.link_dead = True        # USB dropped (EMI) -> waiters bail, no hang
                 break
             if not chunk:
                 continue
@@ -161,7 +181,12 @@ class V2Microcontroller:
         frame = body + bytes([crc8(body)])
         if expect_ack:
             self.mcu_cmd_execution_in_progress = True
-        self.serial.write(frame)
+        try:
+            self.serial.write(frame)
+        except Exception as e:                 # USB dropped mid-write -> don't hang, surface it
+            self.link_dead = True
+            self.mcu_cmd_execution_in_progress = False
+            raise IOError(f"serial write to {self.port} failed (link dropped?): {e}") from e
 
     def _send_pos(self, opcode, microsteps):
         # v2 commands directly in microsteps -- NO full-step rounding (the fix).
@@ -207,6 +232,8 @@ class V2Microcontroller:
     def wait_till_operation_is_completed(self, timeout=5):
         t0 = time.time()
         while self.is_busy() and time.time() - t0 < timeout:
+            if self.link_dead:               # USB dropped -> stop waiting on a reply that won't come
+                break
             time.sleep(0.01)
         self.mcu_cmd_execution_in_progress = False
 

@@ -166,11 +166,15 @@ Order matters: **set the lift first**, then move. Run from `software/`.
 
 ### Status / TODO (as of this writing)
 
-- ✅ Frame zeroed at **true A1 centre**.
-- ⛔ **Only 24/96 wells taught (v2 frame), L-shape** — model RMS 0.93 mm in-sample
-  but **72 wells are model-only with ~12 mm corner error**. The pre-reflash
-  72-well boundary teach is invalid in v2. **THE blocker to "know the wells":**
-  re-teach the boundary (`jog_teach --all --v2`) → `fitkin` → `stepcheck`.
+- ✅ Frame **stable** after the connect-time snap fix (2026-06-15); 8 wells taught in
+  one consistent frame: **4 corners A1/A12/H1/H12 + A2/A3/D6/E7**.
+- ✅ **Untaught wells now covered by the LOCAL grid predictor** (`predict_grid`,
+  distance-weighted) — interior leave-one-out **~1.7 mm** (at the hardware floor),
+  every untaught well interpolates inside the taught hull (4 corners taught), none
+  clamps off-plate. **You do NOT need to teach all 96.** Only two sparse clusters
+  (left-mid ~F4/G4, right-mid ~C9/D10) lack a nearby anchor; teach ONE well in each
+  if a hardware check shows them off. (The old "24/96 L-shape, re-teach the 72-well
+  boundary" plan is superseded — see [LEARNINGS](LEARNINGS.md) 2026-06-15.)
 - ⚠️ **`travelz` is unset** (`z_travel_usteps: null`) — `goto`/`gotopos` move
   WITHOUT a lift and can drag the nozzle. **Set it first** (step 1 above).
 - ⚠️ **WASTE not taught yet** (`named: {}`) — needed for the cycle (step 4 above).

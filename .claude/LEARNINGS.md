@@ -4,6 +4,126 @@ Mistakes made while operating Phil (esp. by the assistant), logged so they don't
 recur. Newest first. See also [FINDINGS](FINDINGS.md) (firmware/mechanism facts)
 and [TROUBLESHOOTING](TROUBLESHOOTING.md).
 
+## 2026-06-15 — NEGATIVE FEEDBACK: I over-blamed "Z=0 dragging" for a jam that was really an EMI hang + a TWO-CLI serial conflict
+
+The operator centred a well, taught F4/C9, everything worked — then on CLI shutdown the arm hung,
+they opened a second terminal, the arm jammed, and taught F4 read off. I repeatedly attributed the
+jam + frame shift to **Z=0 dragging** and pushed a travel-Z lift. The operator corrected me:
+**"there was nothing wrong with the z lift."** They're right; I was wrong.
+
+- **The ACTUAL failure chain (no Z involved):**
+  1. An **EMI USB drop hung the CLI's shutdown park-on-A1 move** — it blocked forever waiting on a
+     serial reply that never came (no `arrived:` line ever printed). `q` did nothing; the process
+     stayed alive (confirmed `ps`: still `Sl+`).
+  2. To regain control the operator **launched a SECOND CLI in another terminal**. Now **two
+     processes shared `/dev/ttyACM1`** → their bytes interleave into **garbage/partial move
+     commands** → the firmware drove the arm to a wrong pose and it **JAMMED** → lost steps →
+     the frame shifted (taught F4 now off).
+  3. The **startup twitch reappeared** for the same root cause: the Teensy **re-enumerated** under
+     EMI, so `connect` saw live-counter ≠ saved and re-ran `initialize_drivers()` (the snap).
+- **Why my Z blame was wrong:** Z=0 dragging is a *secondary* step-loss effect on big moves; it did
+  NOT cause this jam. The jam was a **bad command from the two-process port conflict**. Harping on Z
+  ignored the operator's setup and wasted their patience while the arm was jammed.
+- **Recovery that worked:** killed ALL phil processes (one SIGINT left it up — needed SIGTERM/pkill),
+  confirmed the 10 taught wells were safe on disk, then `drive.py` → jog onto A1 → `r` (reanchor).
+  The reanchor absorbed a big translation (cx +12800 vs the prior +8528 — the jam shoved the frame
+  ~26 mm). No re-teach; the teach table was never in danger.
+
+**Rules this burns in:**
+1. **NEVER run two programs on the Teensy's serial port at once.** Two opens on one `ttyACM`
+   interleave into garbage moves → wrong pose → jam. **FIXED 2026-06-15:** `v2_mc` now takes an
+   exclusive `fcntl.flock` on the serial fd at open → a second CLI/drive/jog_teach is **refused** with
+   a clear "already in use" message (auto-released on exit, no stale lockfile; bypass with
+   `PHIL_NO_PORT_LOCK=1`). And on a dropped link the driver sets `link_dead` so waiters bail instead
+   of burning the 20s move timeout per command; the CLI shutdown park now runs under a 15s **watchdog**
+   thread so an EMI drop can't make the shell un-quittable. (Legacy_mc not covered — v2 is the live
+   path.) The operator is no longer forced to open a second terminal.
+2. **When the operator corrects your root-cause, accept it immediately** (the "USER WAS RIGHT" rule).
+   I asserted Z three times against their setup; the real causes were EMI + the double process.
+3. **Diagnose a jam by the command path first** (was the link dropped? two processes? garbage bytes?)
+   BEFORE blaming motion height. A hung process + a second instance = the real culprit here.
+
+## 2026-06-15 — UNTAUGHT (grid-predicted) wells carry a ~2–3 mm BACKLASH floor that taught wells don't — don't promise "~1 mm"
+
+Hardware test of the local grid predictor (operator drove, eyeballed each landing). Taught wells
+(F4, C9, E8) landed **dead-on**; the untaught neighbour **G4 — one cell from the fresh F4 anchor —
+landed ~3 mm toward H3**, not the ~1 mm I predicted.
+
+- **It is NOT a predictor or frame error** (ruled out on hardware, in this order): the read-only
+  geometry showed `goto`'s G4 target is **1461 usteps from F4 (≈ one clean well) and 2656 from H3
+  (≈1.8 wells)** — the commanded count is right on the G4 grid point, NOT drifting toward H3. And a
+  re-drive of taught **F4 came back dead-on**, so the long C9→G4 Z=0 drag did **not** lose steps
+  (frame intact). So the 3 mm is **physical backlash**, nothing else.
+- **⭐ ROOT CAUSE:** a TAUGHT well replays its **recorded finish direction** (`finish_for_well` →
+  `_approach_joints(approach=…)`), so backlash is cancelled → dead-on. An **UNTAUGHT** grid well has
+  no recorded finish, so `goto` closes with the **generic +X,+Y** take-up — leaving ~2–3 mm of slop
+  wherever the true centre wanted a different engagement. So the ~1 mm floor is a **taught-well**
+  number; untaught wells sit at **~2–3 mm near anchors, ~4–5 mm in sparse spots**.
+- **What I did wrong:** estimated untaught-well accuracy purely from cells-to-nearest-anchor
+  (interpolation distance) and ignored the backlash floor, so I told the operator G4 would be ~1 mm.
+  Interpolation was the smaller term; backlash dominated.
+- **The lever (next session, not done):** normalise every taught count to goto's **+X,+Y-engaged
+  state** BEFORE the grid fit (feed-forward: add a measured per-axis backlash gap to any axis whose
+  stored `finish` is −1). Then the predicted count is in the same backlash state goto produces, and
+  the +X,+Y close-in lands on centre — pulling untaught wells toward the taught-well floor. Needs a
+  one-time measured backlash gap (approach a well +X,+Y vs −X,−Y, diff the counts at the same
+  physical centre). This is the "feed-forward count shift" already flagged in
+  [[phil-backlash-teach-goto-mismatch]] — for untaught wells, not just taught.
+
+**Rules this burns in:**
+1. When estimating an UNTAUGHT well's landing, add the **~2–3 mm backlash floor** to the
+   interpolation estimate — don't quote the taught-well ~1 mm number for a predicted well.
+2. To get a specific well dead-on, **teach it** (it then replays its finish). The predictor is for
+   coverage, not for sub-floor accuracy on a well that matters.
+3. Diagnose a worse-than-expected untaught miss in this order: (a) read-only check the predicted
+   COUNT geometry is sane, (b) re-drive a nearby TAUGHT well to test the frame, THEN (c) attribute
+   the residual to backlash — don't guess.
+
+## 2026-06-15 — ⭐⭐ SOLVED "even the taught wells are ~2 mm off": the connect-time driver re-init SNAPS the whole frame
+
+This is the breakthrough that finally made `goto` land on the taught wells. Symptom: EVERY well
+(taught corners included) sat a **uniform ~2 mm** off, and it survived re-teaching — and the operator
+noticed **the arms do a quick "twitch" at CLI startup**.
+
+- **How we localised it:** a uniform constant offset on ALL wells (corners too) can't be per-well
+  backlash (that varies well-to-well) — it's a **global frame shift**. The operator's clue ("quick
+  movement at startup, maybe it shifts the start point") pointed straight at connect.
+- **⭐ ROOT CAUSE:** `connect()` calls `initialize_drivers()` to make the v2 TMC drivers ramp-able,
+  but that re-init **physically RE-ALIGNS the rotors** (~1 full-step ≈ 2 mm — the visible twitch) and
+  zeros the counter. The code then restores the *old* counter on the assumption "the arm wasn't moved
+  while off, so saved pose == physical pose" — which the twitch violates. Net: the whole frame shifts
+  ~2 mm **every connect**. The open-loop "0 drift / frame intact" check can't see it (the counter just
+  agrees with itself — see [zero-drift-can-lie]).
+- **✅ FIX (`connect()`):** if the Teensy was NOT power-cycled — its live `get_pos()` still matches the
+  saved pose — then the drivers are ALREADY initialised from the prior session, so re-init is needless
+  AND is the snap. Detect "powered through" and **SKIP `initialize_drivers()`**, keeping the live
+  counter untouched. Hardware-confirmed: **the twitch is gone and the frame persists across reconnects.**
+  `PHIL_FORCE_INIT=1` forces the old re-init path if a move ever hangs.
+- **Cross-session cleanup (how we finished it):** wells taught in DIFFERENT pre-fix sessions were each
+  frozen in a *different* snapped frame. So after one `reanchor A1` (which aligns ONE frame) the
+  current-session wells (A1/A2) landed but the old-session corners (H12, …) were still ~2 mm off
+  ("H12 is from before"). With the snap now gone, we **re-taught the stale wells in the stable frame**
+  (`jog_teach H12 A12 H1 D6 E7`); they pulled into one consistent frame and `goto` landed. The
+  `teach_well` fix (subtract a live translation `frame_correction` when storing) makes re-teaching
+  correct even with a reanchor active.
+- **Bonus diagnosis (separate, hardware):** the "USB light blinks, arrow keys freeze then arrive all
+  at once" is **EMI** — `dmesg` shows `usb … disabled by hub (EMI?) … USB disconnect … new device`
+  (Teensy re-enumerating, ttyACM1↔ACM0). Stepper EMI couples into the USB cable. A USB re-enumerate
+  does NOT reset the MCU (frame survives; the snap-skip fix even helps the reconnect). Mitigate with a
+  ferrite choke on the USB cable, route it away from motor/power wires, short shielded cable. See
+  [TROUBLESHOOTING].
+
+**Rules this burns in:**
+1. **Never RE-init the drivers on a reconnect when the Teensy is still powered** — the re-init
+   re-aligns the rotors (~1 step) and the no-motion restore then shifts the WHOLE frame. Detect
+   "powered through" (live counter ≈ saved) and skip it.
+2. A **uniform constant offset on every well (corners included) = a global frame shift** (connect snap
+   / reanchor), NOT per-well backlash. Per-well backlash varies well-to-well; use that to tell them apart.
+3. Wells taught across different (snapped) sessions live in **different frames** — one reanchor aligns
+   only one; **re-teach the stragglers into a single stable frame**.
+4. **Believe an operator-reported startup twitch over the "frame intact" check.** The counter agreeing
+   with itself proves nothing about the physical tip.
+
 ## 2026-06-15 — ⭐ a reanchor's frame_correction drove the arm OFF-PLATE because the off-plate CLAMP used the RAW taught box
 
 The headline bug + a chain of recovery footguns, all hit live this session.
