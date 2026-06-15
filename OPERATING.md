@@ -19,10 +19,19 @@ firmware. Full background + code map: [`.claude/CLAUDE.md`](.claude/CLAUDE.md) a
   median ~0.7 mm local residual, worst ~2.4 mm, i.e. **at the hardware floor**.
 - ✅ Committed + pushed to **`master`** (the repo's primary branch — there is no `main`).
   The teach data travels with the repo.
-- ⚠️ **`travelz` is not set** (`z_travel_usteps: 0`) — `goto` moves with **no lift**
-  and can drag the nozzle across well rims on long traverses. Set it before
-  cross-plate moves (below).
-- ⚠️ **WASTE position not taught** (`named: {}`) — needed for a dispense cycle (below).
+- ✅ **WASTE position taught** (`named: WASTE`, off-plate at the container rim, **hardware-verified**
+  well→WASTE→well). It's a **dispense-from-ABOVE** spot — the nozzle holds at the rim height and
+  never descends *into* the waste (the 5-bar arms would hit the tall wall). Reach it with
+  `gotopos WASTE` (CLI) or `g WASTE` (drive.py).
+- ✅ **Tall-obstacle clearance handled in code:** `goto`/`gotopos` lift to
+  **`max(travelz, current_Z, target_Z)`** (`_safe_move`), so moves *to/from* the tall waste ride
+  at rim height — clearing the wall both entering AND leaving — while plate well-to-well moves
+  stay low. `travelz` stays 0 (fine — the waste uses its own height); set a small `travelz` only
+  if you want extra well-clearance margin.
+- ✅ A bump → **`reanchor A1` recovers the wells AND the WASTE together** (WASTE is stored as a
+  model coordinate, like the wells, so the reanchor translation applies to it too — never re-teach).
+- ⚠️ The Z axis has **no soft limit** — jog Z up only modestly (small steps); over-jogging stalls
+  the motor and hangs the console (see LEARNINGS 2026-06-15).
 
 ## Connect & use
 
@@ -107,15 +116,24 @@ accuracy talk is **X/Y only**; ignore Z unless the operator explicitly raises it
   ~midway between opposite neighbours). Do **not** use `phil/stepcheck.py` — it
   requires `fitkin`, which we don't run.
 
-## The two open items — set `travelz` + teach `WASTE`
+## The dispense cycle (DONE — WASTE taught, lift handled)
+
+The full cycle works on hardware: `goto <well>` → *(liquid handling, outside this code)* →
+`gotopos WASTE` → repeat. Moves to/from the waste auto-lift to the rim and hold there; well
+moves stay low. Nothing more to set up.
+
+**Re-teaching the WASTE (e.g. if the container moves)** — use `drive.py` (arrow keys + Z):
 
 ```bash
-phil> jz 400          # raise Z until the nozzle clears the tallest plate wall (repeat as needed)
-phil> travelz         # capture the current Z as the safe travel height
-# jog the nozzle over the waste-container opening, then:
-phil> teachpos WASTE
-phil> gotopos WASTE   # lift -> traverse -> descend; verify by eye
+python3 -m phil.drive
+#  jog Z UP modestly in SMALL steps (press '-' first) to the waste-rim height — do NOT
+#    over-jog (no soft limit -> stall/hang). Jog X/Y over the waste opening.
+#  press 't', type WASTE   -> saves the rim pose (stored as a model coord; survives reanchor)
+#  press 'g', type WASTE   -> verify (lifts to rim, traverses over, holds)
 ```
+The waste is **dispense-from-above** — it holds at the rim, never descends in. `travelz` is a
+separate global *floor* for the lift; leave it 0 or set a small well-clearance value with
+`v` (drive.py) / `travelz <usteps>` (CLI).
 
 ## Deeper docs (in `.claude/`)
 

@@ -667,6 +667,11 @@ class PhilRobot:
         # driving the arm to a bad/off-plate spot. Derive the box from corrected points.
         fc = self.frame_correction or IDENTITY_CORRECTION
         pts = [_apply_correction(fc, v["X"], v["Y"]) for v in t.values()]
+        # Named off-plate positions (WASTE, PARK) are taught ground truth that sits
+        # OUTSIDE the plate extent ON PURPOSE. Include them in the box, else
+        # goto_position clamps an off-plate target back onto the plate edge and never
+        # reaches the waste. (Jogs are never clamped, so teaching the spot still works.)
+        pts += [_apply_correction(fc, v["X"], v["Y"]) for v in self.teach_table.named.values()]
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
         m = self.JOINT_BOUND_MARGIN
@@ -1302,6 +1307,26 @@ class PhilRobot:
                   "frame shift -> one `reanchor A1` removes it.")
         return rows
 
+    def _safe_move(self, tgt, approach=(1, 1), safe=True):
+        """Lift -> traverse -> descend to a joint target, clearing BOTH the start and the
+        end height. Traverse height = max(travel_z, current Z, target Z): a TALL destination
+        (e.g. the WASTE rim, which we dispense OVER -- never descend into, the arms would hit
+        the wall) forces a high traverse, and LEAVING a tall spot stays high until it has
+        traversed clear, then descends -- while plate well-to-well moves stay low. Without
+        the start/end max, a move to OR from the tall waste would drop the nozzle through the
+        waste wall (the lift used to be the global travel-Z only). ``approach`` replays a
+        taught well's backlash finish; named positions use the canonical +X,+Y."""
+        if not safe:
+            self._approach_joints(tgt["X"], tgt["Y"], approach=approach)
+            self._move_joints_to(z=tgt["Z"])
+            return
+        cur_z = self.joint_position()["Z"]
+        cands = [z for z in (self.teach_table.travel_z(), cur_z, tgt["Z"]) if z is not None]
+        lift_z = max(cands) if cands else tgt["Z"]
+        self._move_joints_to(z=lift_z)                                 # clear start + end + travel floor
+        self._approach_joints(tgt["X"], tgt["Y"], approach=approach)   # traverse at clearance height
+        self._move_joints_to(z=tgt["Z"])                               # descend (no-op if target == lift)
+
     def goto_well(self, well_id: str, safe=True):
         """Move to a well: exact taught position, else derived from the metric map."""
         self._require()
@@ -1324,18 +1349,8 @@ class PhilRobot:
         ann = "" if approach == (1, 1) else (
             f"  (replay finish {'+' if approach[0] > 0 else '-'}X,"
             f"{'+' if approach[1] > 0 else '-'}Y)")
-        travel_z = self.teach_table.travel_z() if safe else None
         print(f"goto {well_id.upper()} [{taught}] -> X={tgt['X']} Y={tgt['Y']} Z={tgt['Z']}{ann}")
-        if travel_z is not None and self.teach_table.z_travel_usteps is not None:
-            self._move_joints_to(z=travel_z)              # lift to safe travel height
-            self._approach_joints(tgt["X"], tgt["Y"], approach=approach)   # close in the taught way
-            self._move_joints_to(z=tgt["Z"])              # descend to the well
-        else:
-            if safe and self.teach_table.z_travel_usteps is None:
-                print("  ** no travel-Z set (run `travelz <usteps>`); moving WITHOUT a "
-                      "lift — risk of dragging the nozzle across the plate.")
-            self._approach_joints(tgt["X"], tgt["Y"], approach=approach)   # close in the taught way
-            self._move_joints_to(z=tgt["Z"])              # set Z
+        self._safe_move(tgt, approach=approach, safe=safe)   # max(travelz,cur,tgt) lift -> traverse -> descend
         mx, my, mz = self._settled_frame()   # SETTLED actual read, never the commanded target
         self._last_joints = (mx, my); self._last_z = mz   # nor a single stale packet (both bake a
         self._save_frame(well=well_id)                    # wrong frame in across reconnects)
@@ -1350,9 +1365,17 @@ class PhilRobot:
         replays it with the same lift -> traverse -> descend motion as a well."""
         self._require()
         p = self.joint_position()
-        self.teach_table.teach_named(name, p["X"], p["Y"], p["Z"])
-        print(f"taught position {name.strip().upper()} @ joints "
-              f"X={p['X']} Y={p['Y']} Z={p['Z']}")
+        # Mirror teach_well: goto_position ADDS a live TRANSLATION correction (reanchor)
+        # back to a named position, so store the PRE-correction (model) joints here --
+        # else the spot replays one whole correction (~cx,cy) off. (An affine correction
+        # is not applied to named positions, and identity is a no-op -> store raw.)
+        tx, ty, tz = p["X"], p["Y"], p["Z"]
+        fc = self.frame_correction
+        if not _is_identity(fc) and _is_translation_only(fc):
+            tx -= int(round(fc["cx"])); ty -= int(round(fc["cy"]))
+        self.teach_table.teach_named(name, tx, ty, tz)
+        print(f"taught position {name.strip().upper()} @ joints X={tx} Y={ty} Z={tz}"
+              + ("" if (tx, ty) == (p["X"], p["Y"]) else f"  (raw {p['X']},{p['Y']} minus live frame shift)"))
         return p
 
     def goto_position(self, name: str, safe=True):
@@ -1375,18 +1398,8 @@ class PhilRobot:
         if not _is_identity(fc) and _is_translation_only(fc):
             x, y = _apply_correction(fc, tgt["X"], tgt["Y"])
             tgt = {**tgt, "X": x, "Y": y}
-        travel_z = self.teach_table.travel_z() if safe else None
         print(f"goto position {nm} -> X={tgt['X']} Y={tgt['Y']} Z={tgt['Z']}")
-        if travel_z is not None and self.teach_table.z_travel_usteps is not None:
-            self._move_joints_to(z=travel_z)              # lift to safe travel height
-            self._approach_joints(tgt["X"], tgt["Y"])     # traverse + close in
-            self._move_joints_to(z=tgt["Z"])              # descend to dispense height
-        else:
-            if safe and self.teach_table.z_travel_usteps is None:
-                print("  ** no travel-Z set (run `travelz <usteps>`); moving to the side "
-                      "WITHOUT a lift — risk of hitting the plate wall. Set travel-Z first.")
-            self._approach_joints(tgt["X"], tgt["Y"])
-            self._move_joints_to(z=tgt["Z"])
+        self._safe_move(tgt, safe=safe)   # high traverse to/from a tall named spot (WASTE); see _safe_move
         mx, my, mz = self._settled_frame()   # settled actual read, not commanded target
         self._last_joints = (mx, my); self._last_z = mz
         self._save_frame()

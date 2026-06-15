@@ -11,15 +11,24 @@ Keys:
     Left / Right    Y arm  +/-
     a / z           Z up / down
     + / -           bigger / smaller jog step
-    g               go to a well (type the well id, e.g. D6, then Enter)
+    g               go to a well (e.g. D6) OR a named position (e.g. WASTE) — lift/traverse/descend
     r               reanchor: lock the whole frame to A1 (jog onto A1's center first,
                     then press r — recovers a shifted frame, no re-teach)
+    t               log the CURRENT pose as a named off-plate position (e.g. WASTE)
+    v               set the travel-Z lift to the CURRENT Z (gotopos lifts here FIRST, then over)
     p               print the current joint position
     q               quit
 
-This is a SAFE driver: it never teaches, never homes/zeros the frame, and never
-writes calibration — so you can move the arm freely without disturbing the taught
-wells. The joints are rotary with backlash, so jog small.
+This is a SAFE driver: it never teaches WELLS, never homes/zeros the frame, and never
+writes calibration — so the taught wells are never disturbed. `t` saves a NAMED
+off-plate position and `v` sets the travel-Z lift; both are operational settings (not
+well teaching) and are persisted to the teach file. Jog small (rotary + backlash).
+
+  Teach a WASTE spot:  press `-` to a SMALL step first. Jog Z up only a MODEST amount
+  (a few taps — just enough to clear the tallest wall). Do NOT hold `a` / over-jog: the Z
+  axis has NO soft limit and will stall + hang the console. Press `v` (sets the lift) →
+  jog over the waste opening and down to dispense height, press `t` and type WASTE →
+  verify with `g WASTE` (lift → traverse → descend, "up first, then over").
 """
 from __future__ import annotations
 
@@ -72,7 +81,7 @@ def _status(bot, step):
     j = bot.joint_position()
     sys.stdout.write(
         f"\r  X={j['X']:+6d} Y={j['Y']:+6d} Z={j['Z']:+6d} | step={step:3d} usteps "
-        f"| arrows=move  a/z=Z  +/-=step  g=goto  r=reanchor-A1  p=pos  q=quit     "
+        f"| move  a/z=Z  +/-=step  g=goto  r=reanchor  t=log-pos  v=set-travelZ  q=quit  "
     )
     sys.stdout.flush()
 
@@ -141,12 +150,31 @@ def main(argv=None):
                 except Exception as e:
                     sys.stdout.write(f"  [reanchor failed: {e}]\n")
             elif key == "g":
-                well = _prompt_line(fd, old, "  go to well: ")
-                if well:
+                name = _prompt_line(fd, old, "  go to well / named pos (e.g. D6, WASTE): ").strip().upper()
+                if name:
                     try:
-                        bot.goto_well(well)
+                        if bot.teach_table.is_named(name):
+                            bot.goto_position(name)           # lift -> traverse -> descend
+                        else:
+                            bot.goto_well(name)
                     except Exception as e:
                         sys.stdout.write(f"  [goto failed: {e}]\n")
+            elif key == "t":
+                # Log the CURRENT pose as a named off-plate position (e.g. WASTE). Does NOT
+                # touch taught wells/calibration -- adds to teach_table.named, then PERSISTS
+                # (teach_position itself does not save to disk).
+                name = _prompt_line(fd, old, "  save current pose as named position (e.g. WASTE): ").strip().upper()
+                if name:
+                    bot.teach_position(name)
+                    bot.teach_table.save(bot.teach_path)
+                    sys.stdout.write(f"  [saved '{name}' & persisted -> reach with 'g {name}' / CLI 'gotopos {name}']\n")
+            elif key == "v":
+                # Capture the CURRENT Z as the travel-Z lift. Jog Z ALL THE WAY UP first,
+                # THEN press v -> goto/gotopos lift to here before traversing ("up then over").
+                bot.set_travel_z()
+                bot.teach_table.save(bot.teach_path)
+                sys.stdout.write(f"\n  [travel-Z lift = {bot.teach_table.z_travel_usteps} usteps & persisted "
+                                 f"-> gotopos lifts ALL the way up here first, then over]\n")
             elif key == "p":
                 j = bot.joint_position()
                 sys.stdout.write(f"\n  joints: X={j['X']} Y={j['Y']} Z={j['Z']} usteps\n")

@@ -4,6 +4,58 @@ Mistakes made while operating Phil (esp. by the assistant), logged so they don't
 recur. Newest first. See also [FINDINGS](FINDINGS.md) (firmware/mechanism facts)
 and [TROUBLESHOOTING](TROUBLESHOOTING.md).
 
+## 2026-06-15 — WASTE teach: a Z over-jog HUNG the arm, + two bugs that would've put the waste ~96 mm off / dropped the nozzle into the wall
+
+Teaching the off-plate WASTE (a tall container we dispense into from ABOVE — the 5-bar arms can't
+descend inside it) surfaced three things:
+
+1. **NEGATIVE FEEDBACK / my bad advice — "jog Z ALL THE WAY UP" stalled + HUNG the console.** The Z
+   axis has **no soft limit**; with the big v2 jog step + a held key, Z ran to ~787k usteps, the motor
+   stalled at the top, and the move's `_wait()` blocked → the whole console froze (needed SIGKILL;
+   SIGTERM didn't take). The counter overshot, so its value was meaningless. Recovery: kill the
+   process, jog Z back to well height **by eye** (NEVER by the counter — it overshot), then re-zero
+   **Z only** via `mc.set_position_usteps(AXIS_Z, 0)` + `_confirm_counter({"Z":0})` (the fire-and-forget
+   write needs the poll-confirm) — leaves X/Y/A1 untouched. **Rule:** jog Z up only MODESTLY, small
+   steps, never "all the way"; if the nozzle stops rising while you press, that's the stall → STOP.
+   Fixed the drive.py help text that told the operator to jog "all the way up."
+
+2. **BUG — `teach_position` stored RAW joints while `goto_position` ADDS the reanchor correction → ~96 mm
+   off.** `teach_well` subtracts the live translation correction before storing (a model coord);
+   `teach_position` did NOT, so with a reanchor active (cx=+14832 ≈ 96 mm) a named spot replayed one
+   whole correction off. **FIXED:** `teach_position` now mirrors `teach_well` (subtract the translation).
+   Bonus: WASTE is now a model coord, so **`reanchor A1` recovers the WASTE along with the wells** (it
+   wouldn't have before). Also corrected the already-stored WASTE value in the data.
+
+3. **BUG — global `travelz` can't clear a tall obstacle, and LEAVING the waste dropped the nozzle into
+   the wall.** `goto` lifted only to the global `travelz`; leaving the waste (current Z high) it lifted
+   *down* to 0 while still over the waste → into the wall. **FIXED:** new `_safe_move` lifts to
+   `max(travelz, current_Z, target_Z)` — moves to/from the tall waste ride at rim height (clear the wall
+   both entering AND leaving), well-to-well stays low. `_joint_bounds` now also includes named positions
+   so an off-plate WASTE isn't clamped onto the plate. Hardware-verified well→WASTE→well; 20/20 tests pass.
+
+## 2026-06-15 — WRONG RECOMMENDATION: I told the operator to do a 4-corner `anchor fit` to fix a bump on an ALL-TAUGHT plate — but the affine is never applied to taught wells
+
+After the operator bumped the arm, a 1-point `reanchor` on A1 recovered it but left a far well
+(D6) "good but not exactly like before." I recommended the 4-corner `anchor fit` (affine) to
+tighten it. The operator asked me to *investigate why it helps* — and reading the code showed it
+**wouldn't help at all** for their case.
+
+- **Why it's wrong:** `_resolve_well` (robot.py:997) applies a full-affine `frame_correction` ONLY
+  to model-derived (untaught) wells — `if src == "taught" and not _is_translation_only(fc): return tgt`
+  (comment: *"don't apply the edge affine to truth"*). Taught wells get only the *translation* part of
+  the correction. **All 96 wells are taught**, so a 4-corner affine has **ZERO effect on any `goto`.**
+  The anchor fit exists to sharpen UNTAUGHT/predicted wells' edges, not to correct taught wells.
+- **Also conceptually wrong:** a bump is a **uniform joint-count offset = a pure translation in joint
+  space**, which `reanchor` already models exactly. There is no rotation for an affine to catch.
+- **So the only frame fix that affects taught wells is `reanchor` (translation).** A "not exactly"
+  residual on an all-taught plate is A1-centering imprecision + the ~1–2 mm hardware floor — redo the
+  reanchor centering A1 carefully, or accept the floor.
+
+**Rule burned in:** on an ALL-TAUGHT plate, do NOT recommend `anchor` / `anchor fit` to fix a bump or a
+residual — the affine is deliberately never applied to taught wells (robot.py:997), and a bump is a
+translation anyway. Use `reanchor` (translation); the 4-corner affine is ONLY for sharpening
+UNTAUGHT / model-derived wells' edges. Read the resolution path before prescribing a calibration fix.
+
 ## 2026-06-15 — NEAR-MISS: I told the operator to run `fitkin` after a full teach — would have regressed the calibration they'd just spent an hour building
 
 Planning a teach-all-96 session, I parroted the stale "teach the wells → run `fitkin` afterward to fold

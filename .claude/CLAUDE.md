@@ -179,9 +179,15 @@ Order matters: **set the lift first**, then move. Run from `software/`.
   (left-mid ~F4/G4, right-mid ~C9/D10) lack a nearby anchor; teach ONE well in each
   if a hardware check shows them off. (The old "24/96 L-shape, re-teach the 72-well
   boundary" plan is superseded — see [LEARNINGS](LEARNINGS.md) 2026-06-15.)
-- ⚠️ **`travelz` is unset** (`z_travel_usteps: null`) — `goto`/`gotopos` move
-  WITHOUT a lift and can drag the nozzle. **Set it first** (step 1 above).
-- ⚠️ **WASTE not taught yet** (`named: {}`) — needed for the cycle (step 4 above).
+- ✅ **All 96 wells taught** AND **WASTE taught** (2026-06-15) — off-plate at the container rim,
+  **dispense-from-ABOVE** (never descend in; the arms would hit the wall). Full
+  `goto <well>`→`gotopos WASTE`→`goto` cycle **hardware-verified**.
+- ✅ **Tall-obstacle lift in code:** `goto`/`gotopos` lift to `max(travelz, current_Z, target_Z)`
+  (`_safe_move`) so moves to/from the tall waste clear the wall both ways while well-to-well stays
+  low. A bump → `reanchor A1` recovers the wells **and** WASTE (WASTE stored as a model coord).
+  `travelz` left 0 (waste uses its own height; set a small one only for extra well margin).
+  Z has **no soft limit** — jog Z up modestly, small steps (over-jogging stalls/hangs). **Live
+  state: [`../OPERATING.md`](../OPERATING.md).**
 
 ## How to connect
 
