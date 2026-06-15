@@ -310,29 +310,47 @@ class PhilRobot:
             # lunge the arm. (Open-loop rule: arm not hand-moved while off, so the saved
             # pose == the physical pose.)
             time.sleep(0.3)
-            if self._last_joints is not None:
-                lx, ly, _, _ = self.mc.get_pos()          # firmware counter BEFORE re-init
-                if (abs(lx - self._last_joints[0]) + abs(ly - self._last_joints[1])
-                        > self.FRAME_RESET_THRESHOLD) and (lx or ly):
+            import os as _os
+            # ⭐ The host INITIALIZE makes the drivers ramp-able, but it RE-ALIGNS the rotors
+            # (the ~1 full-step "quick movement" at connect) AND zeros the counter -- then we
+            # restore the OLD counter assuming no motion, so the whole frame ends up ~1 step
+            # (~2 mm) off, EVERY well (corners included). If the Teensy was NOT power-cycled,
+            # its counter still holds the last session's pose and the drivers are ALREADY
+            # initialized from that session -- so re-INITIALIZE is needless AND is the snap.
+            # Detect "powered through" (live counter still matches the saved pose) and SKIP
+            # the re-init, keeping the live counter untouched -> no snap, frame preserved.
+            # (Force the old re-init path with PHIL_FORCE_INIT=1 if a move ever hangs.)
+            already_up = False
+            if self._last_joints is not None and not _os.environ.get("PHIL_FORCE_INIT"):
+                lx, ly, _, _ = self.mc.get_pos()          # firmware counter BEFORE any re-init
+                drift = abs(lx - self._last_joints[0]) + abs(ly - self._last_joints[1])
+                if (lx or ly) and drift <= self.FRAME_RESET_THRESHOLD:
+                    already_up = True                     # powered through; drivers + counter intact
+                elif (lx or ly):
                     self.frame_suspect = True
                     print(f"  ** firmware counter ({lx},{ly}) != saved {self._last_joints}; "
                           f"restoring it (if the arm was hand-moved while off, `reanchor A1`).")
-            self.mc.initialize_drivers()                  # make the drivers able to ramp (zeros counter)
-            time.sleep(0.8)
-            self.connected = True                         # link is up; needed so the restore
-            #                                               confirm below can read joint_position()
-            if self._last_joints is not None:             # restore the frame INITIALIZE just zeroed
-                self.mc.set_position_usteps(C.AXIS_X, self._last_joints[0])
-                self.mc.set_position_usteps(C.AXIS_Y, self._last_joints[1])
-                tgt = {"X": self._last_joints[0], "Y": self._last_joints[1]}
-                if self._last_z is not None:
-                    self.mc.set_position_usteps(C.AXIS_Z, self._last_z)
-                    tgt["Z"] = self._last_z
-                # CONFIRM the restore landed (same fire-and-forget SET_POSITION as set_home).
-                # An unconfirmed restore would leave a wrong counter for the whole session.
-                if not self._confirm_counter(tgt):
-                    self.frame_suspect = True
-                    print("  ** frame restore not confirmed — `reanchor A1` before any goto.")
+            if already_up:
+                self.connected = True
+                print("  [Teensy powered through: drivers up + counter intact -> skipped re-init "
+                      "(no startup snap; frame preserved)]")
+            else:
+                self.mc.initialize_drivers()              # make the drivers able to ramp (zeros counter)
+                time.sleep(0.8)
+                self.connected = True                     # link is up; needed so the restore
+                #                                           confirm below can read joint_position()
+                if self._last_joints is not None:         # restore the frame INITIALIZE just zeroed
+                    self.mc.set_position_usteps(C.AXIS_X, self._last_joints[0])
+                    self.mc.set_position_usteps(C.AXIS_Y, self._last_joints[1])
+                    tgt = {"X": self._last_joints[0], "Y": self._last_joints[1]}
+                    if self._last_z is not None:
+                        self.mc.set_position_usteps(C.AXIS_Z, self._last_z)
+                        tgt["Z"] = self._last_z
+                    # CONFIRM the restore landed (same fire-and-forget SET_POSITION as set_home).
+                    # An unconfirmed restore would leave a wrong counter for the whole session.
+                    if not self._confirm_counter(tgt):
+                        self.frame_suspect = True
+                        print("  ** frame restore not confirmed — `reanchor A1` before any goto.")
             # v2 HONORS vel/accel (legacy ignored it). On this 5-bar's inertia an
             # aggressive profile SKIPS STEPS mid-move -> the counter lies and goto lands
             # way off, taught wells included, worse as error accumulates. Keep it slow
@@ -910,13 +928,21 @@ class PhilRobot:
         canonical +X,+Y close-in.
         """
         p = self.joint_position()
-        self.teach_table.teach(well_id, p["X"], p["Y"], p["Z"], finish=finish)
+        # A live TRANSLATION correction (from reanchor) is ADDED to taught wells by goto
+        # (_resolve_well), so store the PRE-correction joints here -- otherwise a newly
+        # taught well lands one whole correction (~cx,cy) off. Identity, or an affine
+        # correction (which is NOT applied to taught wells), -> store the raw joints.
+        tx, ty, tz = p["X"], p["Y"], p["Z"]
+        fc = self.frame_correction
+        if not _is_identity(fc) and _is_translation_only(fc):
+            tx -= int(round(fc["cx"])); ty -= int(round(fc["cy"]))
+        self.teach_table.teach(well_id, tx, ty, tz, finish=finish)
         # also record for the mm<->joint affine (the "metric system")
-        self.calibration.add_reference(
-            well_id, (p["X"], p["Y"], p["Z"]), plate=self.plate)
+        self.calibration.add_reference(well_id, (tx, ty, tz), plate=self.plate)
         if self.well_map:
             self.well_map.fit()
-        print(f"taught {well_id.upper()} @ joints X={p['X']} Y={p['Y']} Z={p['Z']}")
+        note = "" if (tx, ty) == (p["X"], p["Y"]) else f"  (raw {p['X']},{p['Y']} minus live frame shift)"
+        print(f"taught {well_id.upper()} @ joints X={tx} Y={ty} Z={tz}{note}")
         if self.calibration.is_fitted and len(self.calibration.reference_points) >= 2:
             print("  metric map: " + self.calibration.summary())
         return p
