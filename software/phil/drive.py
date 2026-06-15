@@ -95,6 +95,13 @@ def main(argv=None):
 
     bot = PhilRobot(backend="sim" if simulate else DEFAULT_BACKEND, simulate=simulate)
     bot.connect()
+    # On v2 the joints are 32x finer (microsteps), so the legacy full-step ladder
+    # tops out at ~0.5 mm -- painfully slow to cross a well during a frame recovery.
+    # Scale the jog ladder the same way jog_teach does: fine-center .. fast travel.
+    if getattr(bot, "_ustep_scale", 1) != 1:
+        global STEPS, DEFAULT_STEP_IDX
+        STEPS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]   # ~0.035 .. ~9 mm at the tip
+        DEFAULT_STEP_IDX = 6                                  # 512 ~ 2.3 mm; '-' for fine
     print(__doc__)
 
     step_idx = DEFAULT_STEP_IDX

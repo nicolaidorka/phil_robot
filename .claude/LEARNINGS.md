@@ -4,6 +4,40 @@ Mistakes made while operating Phil (esp. by the assistant), logged so they don't
 recur. Newest first. See also [FINDINGS](FINDINGS.md) (firmware/mechanism facts)
 and [TROUBLESHOOTING](TROUBLESHOOTING.md).
 
+## 2026-06-15 — NEAR-MISS: I told the operator to run `fitkin` after a full teach — would have regressed the calibration they'd just spent an hour building
+
+Planning a teach-all-96 session, I parroted the stale "teach the wells → run `fitkin` afterward to fold
+them into the model" recipe straight out of CLAUDE.md/RULES.md. The operator caught it: *"make sure we
+don't make that mistake about fitkin again, that would have been devastating."* They're right.
+
+- **Why it was dangerous:** `fitkin` refits the **5-bar kinematic model**, which the code has already
+  **RETIRED to dead-last** (`robot.py` `_resolve_raw` doc: *"the 5-bar kinematics is retired to dead-last
+  — it overfit/extrapolated badly"*) and which RULES flags as **non-convex → can REGRESS a good fit**.
+  Running it right after a careful manual teach could have distorted the working calibration — undoing
+  the whole session — for **zero benefit**.
+- **Why zero benefit:** a taught well **short-circuits the model** (`_resolve_raw` returns the `is_taught`
+  branch FIRST, before grid/curve-fit/5-bar). With all 96 taught, `goto` never consults a model at all.
+  And untaught wells use the **rigid-grid predictor** (`predict_grid`), not the 5-bar — so even partial
+  teach sets don't want `fitkin`.
+- **Root cause (mine):** I recited the docs' teaching recipe without reconciling it against the newer
+  code reality (5-bar retired, rigid grid primary, taught-wins). The docs themselves still said "run
+  `fitkin` afterward" in two places — a stale instruction that contradicts the code.
+
+**Rules this burns in:**
+1. ⛔ **Do NOT run `fitkin` after a teach pass (partial OR all-96).** It's the non-convex 5-bar refit;
+   it can regress a good calibration and does nothing for taught wells (they short-circuit the model).
+   `fitkin` is ONLY for a genuine *physical* arm-geometry change. After teaching, the steps that matter
+   are: **set `travelz`, teach `WASTE`.** **FIXED 2026-06-15:** removed the stale "run fitkin afterward"
+   instruction from CLAUDE.md (Teaching section) and RULES.md and replaced both with this warning.
+2. **Protect the teaching work from any save path. FIXED 2026-06-15:** `TeachTable.save()` now (a)
+   snapshots the existing file to a timestamped `.backup-*` before EVERY overwrite (keeps newest 30), and
+   (b) **refuses a catastrophic shrink** — if a save would lose >half the taught wells (the tiptrack
+   26→6 wipe signature, or a wipe to 0) it raises `TeachShrinkGuard`, leaves the good file on disk, and
+   dumps the attempted table to a `.rejected-save-*` sidecar so BOTH states survive (override with
+   `save(allow_shrink=True)`; a normal 1-2 well undo is still allowed). Core `save()` previously had NO
+   backup at all — only tiptrack's fit path did — so a normal/partial/crashed write could clobber the
+   table irrecoverably. Verified: 20/20 tests pass + a functional test of backup + guard + override.
+
 ## 2026-06-15 — NEGATIVE FEEDBACK: I over-blamed "Z=0 dragging" for a jam that was really an EMI hang + a TWO-CLI serial conflict
 
 The operator centred a well, taught F4/C9, everything worked — then on CLI shutdown the arm hung,

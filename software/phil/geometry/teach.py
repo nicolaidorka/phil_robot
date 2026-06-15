@@ -12,12 +12,23 @@ wells (a taught well always overrides the interpolation).
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
+import shutil
+import time
 
 from ..paths import DEFAULT_TEACH_PATH  # re-exported so callers keep importing it from here
 
 CORNERS = ("A1", "A12", "H1", "H12")    # default (96-well) corners, for display/messages
+
+# How many timestamped teach-table backups to keep (newest wins; older pruned).
+MAX_TEACH_BACKUPS = 30
+
+
+class TeachShrinkGuard(RuntimeError):
+    """Raised when a save would catastrophically shrink the taught table (the
+    tiptrack-style wipe, e.g. 26 wells -> 6). The on-disk file is left untouched."""
 
 
 def plate_corners(plate) -> tuple:
@@ -254,9 +265,55 @@ class TeachTable:
                 "taught": self.taught,
                 "named": self.named}
 
-    def save(self, path=None) -> str:
+    def _disk_taught_count(self, path) -> int:
+        """How many wells the on-disk teach file holds right now (0 if none/unreadable)."""
+        try:
+            with open(path) as f:
+                return len(json.load(f).get("taught", {}))
+        except Exception:
+            return 0
+
+    def _backup_existing(self, path) -> str | None:
+        """Snapshot the current on-disk teach file to a timestamped backup BEFORE any
+        overwrite, so a save can never irrecoverably clobber taught work. Keeps the
+        newest MAX_TEACH_BACKUPS, prunes older. Returns the backup path (or None)."""
+        if not os.path.isfile(path):
+            return None
+        root, ext = os.path.splitext(path)
+        bak = f"{root}.backup-{int(time.time())}{ext}"
+        try:
+            shutil.copy2(path, bak)
+        except Exception:
+            return None
+        for old in sorted(glob.glob(f"{root}.backup-*{ext}"))[:-MAX_TEACH_BACKUPS]:
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+        return bak
+
+    def save(self, path=None, allow_shrink=False) -> str:
         path = path or DEFAULT_TEACH_PATH
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # SAFEGUARD 1 -- never silently lose taught work: snapshot the current file to
+        #   a timestamped backup before overwriting (recover from the newest .backup-*).
+        # SAFEGUARD 2 -- refuse a CATASTROPHIC shrink (the tiptrack-style wipe, e.g.
+        #   26 wells -> 6): if this save would lose MORE THAN HALF the taught wells (or
+        #   wipe to zero), leave the good file ON DISK untouched and dump what we have
+        #   to a sidecar, so BOTH states survive. A normal edit/undo (a few wells) is
+        #   allowed. allow_shrink=True is the deliberate override.
+        n_new, n_disk = len(self.taught), self._disk_taught_count(path)
+        catastrophic = n_disk and (n_new == 0 or n_new * 2 < n_disk)
+        if catastrophic and not allow_shrink:
+            bak = self._backup_existing(path)
+            rej = f"{os.path.splitext(path)[0]}.rejected-save-{int(time.time())}.json"
+            with open(rej, "w") as f:
+                json.dump(self.to_dict(), f, indent=2)
+            raise TeachShrinkGuard(
+                f"REFUSED to overwrite {path}: would drop taught wells {n_disk} -> {n_new}. "
+                f"On-disk file PRESERVED (backup: {bak}); this session written to {rej}. "
+                f"If the shrink is intended, save(allow_shrink=True).")
+        self._backup_existing(path)
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
         return path

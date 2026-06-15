@@ -291,24 +291,32 @@ software/phil/
 ## Teaching / re-calibrating
 
 The arm is open-loop with backlash, so the dependable approach is **teach the
-boundary, refit, interpolate the interior**. **Current state (post-reflash,
-2026-06-13): only 24/96 taught in the v2 frame** — an L-shape (row A + column 1
-+ C9/D6/E4/F9/H12); 72 wells are model-only with ~12 mm corner error. **The
-proven 72-well boundary teach (rows A–E + H, RMS 0.42 mm) was PRE-REFLASH and is
-invalid in v2 units** (`config/pre-reflash-backup/`); it has **not** been rebuilt.
-**To actually know the wells, redo the boundary teach in v2** — this is the open
-work, not done:
+wells you need and let `goto` replay them exactly** — a taught well short-circuits
+the model entirely (`_resolve_raw`: the `is_taught` branch wins first), so the
+model is only ever a fallback for *untaught* wells.
 
-1. `python3 -m phil.jog_teach --all --v2` — walks the wells in snake order,
+**Current state (2026-06-15):** stable v2 frame with a growing taught set (10+
+wells incl. all 4 corners). Untaught wells fall back to the **rigid-grid predictor**
+(`predict_grid`, interior LOO ~1.7 mm = at the hardware floor). The old
+"24/96 L-shape" / "teach the 72-well boundary then `fitkin`" plan is **superseded** —
+see the Status section above and [LEARNINGS](LEARNINGS.md).
+
+To teach more wells (or all 96):
+
+1. `python3 -m phil.jog_teach --all` — walks the wells in snake order,
    auto-approaching each from the last (taught spot if known, else the model).
-   Nudge to center, `Enter` to record, `n` to skip (e.g. past F/G if you're
-   leaving them to the model), final approach in one direction (backlash).
-   **Do NOT press `h`** — it zeros the frame and wrecks the wells already taught.
-   `s` saves progress, `q` quits — rerun `--all` to resume (already-taught wells
-   are re-approached so you can confirm or `n` past).
-2. After teaching new wells, run `fitkin` to refit the 5-bar (so the interior
-   interpolation reflects them). `goto` then replays taught joints exactly and
-   uses the refit model for whatever stays untaught.
+   Nudge to center, `Enter` to record, `n` to skip, final approach in one
+   direction (backlash). **Do NOT press `h`** — it zeros the frame and wrecks the
+   wells already taught. `s` saves progress, `q` quits — rerun `--all` to resume
+   (already-taught wells are re-approached so you can confirm or `n` past). Saves
+   are auto-backed-up and a catastrophic shrink is refused (see [LEARNINGS](LEARNINGS.md)).
+2. ⛔ **Do NOT run `fitkin` after a normal teach pass.** It refits the **5-bar
+   kinematic model**, which is **retired to dead-last** (overfits/extrapolates) and
+   is **non-convex — it can REGRESS a good calibration** (see [RULES](RULES.md)). It
+   does **nothing** for taught wells (they short-circuit the model) and untaught
+   wells use the rigid grid, not the 5-bar. The only "after teaching" steps that
+   matter are **set `travelz`** and **teach `WASTE`**. `fitkin` is reserved for the
+   rare case the arm geometry physically *changes* (below).
 
 If the **arm geometry physically changes**, the kinematic model is stale: do a
 *fresh* teach of a spread of wells — on the FIRST well only, center it and press

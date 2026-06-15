@@ -96,8 +96,11 @@ this. (Cost the user a long, frustrating session by skipping it — 2026-06-13.)
   last. Nudge to center, Enter to record, `n` to skip, final approach in ONE
   direction (backlash), "over the well" is good enough. **Do NOT press `h`** in
   `--all` — it zeros the frame and wrecks the wells already taught. `s` saves,
-  `q` quits — rerun `--all` to resume. Run `fitkin` afterward to fold new wells
-  into the interior interpolation.
+  `q` quits — rerun `--all` to resume. ⛔ **Do NOT run `fitkin` after a normal
+  teach pass** — it refits the retired, non-convex 5-bar and can REGRESS a good
+  calibration; taught wells short-circuit the model anyway and untaught wells use
+  the rigid grid. `fitkin` is ONLY for a physical geometry change (next section).
+  After teaching, the steps that matter are: set `travelz`, teach `WASTE`.
 
 ## Re-fitting the 5-bar (rare — only if the arm geometry physically changes)
 1. Do a *fresh* teach of a spread of wells (4 corners, 4 edge midpoints, 2

@@ -17,6 +17,8 @@ software/phil/config/*.bak
 # Local teach/frame recovery + cleanup backups (machine-specific, not shared)
 software/phil/config/*.backup
 software/phil/config/phil_teach.backup-*.json
+software/phil/config/phil_teach.SNAPSHOT-*.json
+software/phil/config/phil_teach.rejected-save-*.json
 software/phil/config/*.precleanup-bak
 software/phil/config/_GOOD_BACKUP/
 software/phil/config/_OLD_pre_grid_*/
