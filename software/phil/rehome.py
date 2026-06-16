@@ -22,7 +22,7 @@ import termios
 import tty
 
 from .robot import PhilRobot
-from .constants import DEFAULT_BACKEND
+from .constants import DEFAULT_BACKEND, CONTROLLER_SN
 
 
 def _read_key():
@@ -58,7 +58,7 @@ def main(argv=None):
     if "--anchor" in raw:
         i = raw.index("--anchor")
         anchor_well = raw[i + 1].upper() if i + 1 < len(raw) else "H12"
-    bot = PhilRobot(backend="v2" if use_v2 else "legacy")
+    bot = PhilRobot(backend="v2" if use_v2 else "legacy", controller_sn=CONTROLLER_SN)
     steps = [8, 16, 32, 64, 128, 256, 512, 1024] if use_v2 else [8, 16, 32, 64, 120]
     si = 3
     if use_v2:

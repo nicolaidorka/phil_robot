@@ -53,7 +53,7 @@ import argparse
 import sys
 
 from .robot import PhilRobot, PhilHandshakeError
-from .constants import DEFAULT_BACKEND
+from .constants import DEFAULT_BACKEND, CONTROLLER_SN
 
 
 def _jfmt(p: dict) -> str:
@@ -274,7 +274,8 @@ def main(argv=None):
 
     bot = PhilRobot(labware_path=args.labware, teach_path=args.teach,
                     simulate=args.simulate, backend=args.backend,
-                    controller_version=args.version)
+                    controller_version=args.version,
+                    controller_sn=CONTROLLER_SN)   # bind to Phil's board, never the microscope's
     try:
         bot.connect()
     except PhilHandshakeError as e:

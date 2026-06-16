@@ -23,6 +23,19 @@ these to match.
 # (or pass --legacy / --backend legacy at any entry point as an override).
 DEFAULT_BACKEND = "v2"
 
+# --- which Teensy is Phil (SINGLE SOURCE OF TRUTH for every entry point) ------
+# SAFETY: TWO identical Teensys are on this rig — Phil (16640550) AND the Squid
+# MICROSCOPE stage controller (16640280). They share VID/PID/manufacturer and
+# differ ONLY by serial number, so any tool that auto-detects "first Teensy" can
+# grab the MICROSCOPE's board and its jogs then drive the microscope stage (hit
+# live 2026-06-15). To make that impossible, EVERY entry point (cli, jog_teach,
+# rehome, measure, drive, tiptrack, selftest, and unistream's PhilController)
+# binds PhilRobot to THIS serial number, and find_controller matches it STRICTLY
+# (never falls back to "any Teensy"). Override per run on another rig with:
+#   PHIL_SN=<serial>  python3 -m phil.<tool>
+import os as _os
+CONTROLLER_SN = _os.environ.get("PHIL_SN") or "16640550"
+
 # --- axis identifiers (match control._def.AXIS) -----------------------------
 AXIS_X = 0
 AXIS_Y = 1

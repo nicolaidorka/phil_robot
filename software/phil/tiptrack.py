@@ -66,7 +66,7 @@ def main(argv=None):
     raw = list(argv if argv is not None else sys.argv[1:])
     ap = argparse.ArgumentParser(prog="phil.tiptrack",
                                  description="Live 5-bar tip tracker + interactive teach.")
-    from .constants import DEFAULT_BACKEND
+    from .constants import DEFAULT_BACKEND, CONTROLLER_SN
     ap.add_argument("--simulate", action="store_true", help="no hardware")
     ap.add_argument("--backend", default=DEFAULT_BACKEND,
                     choices=["legacy", "v2", "stock", "sim"])
@@ -83,7 +83,8 @@ def main(argv=None):
     args = ap.parse_args(raw)
 
     backend = "sim" if args.simulate else args.backend
-    bot = PhilRobot(backend=backend, simulate=args.simulate, labware_path=args.labware)
+    bot = PhilRobot(backend=backend, simulate=args.simulate, labware_path=args.labware,
+                    controller_sn=CONTROLLER_SN)   # bind to Phil's board, never the microscope's
     bot.connect()
 
     try:

@@ -173,6 +173,7 @@ class PhilRobot:
         self._last_z = None             # last Z joints: persisted + restored on connect
         self._frame_scale = None        # ustep scale the saved frame was written in (256=v2, 8=legacy)
         self.frame_suspect = False      # True if the counter looks reset on connect
+        self._mc_epoch = 0              # last mc reconnect-epoch we've re-validated
         self._load_frame()
 
         self.simulate = simulate
@@ -454,6 +455,29 @@ class PhilRobot:
     # ----------------------------------------------------------------- wait
     def _wait(self):
         self.mc.wait_till_operation_is_completed(self.move_timeout_s)
+        self._revalidate_after_reconnect()
+
+    def _revalidate_after_reconnect(self):
+        """If the mc re-established the USB link since we last looked, decide whether the
+        joint frame is still trustworthy. A USB re-enumerate USUALLY preserves the Teensy
+        counter (-> resume), but can reset it (-> the frame is a lie). The mc compares its
+        pre-drop vs first fresh post-reopen counter and sets counter_reset_after_reconnect;
+        on a reset (or any uncertainty) we set frame_suspect so goto BLOCKS until reanchor.
+        No-op for backends without reconnect (legacy/sim) -> getattr defaults."""
+        mc = self.mc
+        if mc is None:
+            return
+        epoch = getattr(mc, "_reconnect_epoch", 0)
+        if epoch == self._mc_epoch:
+            return
+        self._mc_epoch = epoch
+        if getattr(mc, "counter_reset_after_reconnect", True):
+            self.frame_suspect = True
+            print(f"  ** USB link re-established but the joint counter looks RESET -> frame "
+                  f"unverified. Jog onto {self.ANCHOR_WELL} and `reanchor {self.ANCHOR_WELL}` "
+                  f"before any goto.")
+        else:
+            print("  ** USB link re-established; joint counter intact -> resuming.")
 
     def _confirm_joints(self, x=None, y=None, tol=None, timeout=None):
         """Poll the live joints until the commanded axes actually reach target.
@@ -469,6 +493,17 @@ class PhilRobot:
         t0 = time.time()
         hits = 0
         while True:
+            # EMI: if the link dropped mid-confirm (no command in flight to trigger a
+            # reopen), recover it here -- the firmware finishes the ABSOLUTE move on its
+            # own, so once the link is back we'll see the arm reach target. A counter
+            # RESET makes the target meaningless -> stop (goto surfaces frame_suspect).
+            if getattr(self.mc, "link_dead", False):
+                if hasattr(self.mc, "recover_if_dead"):
+                    self.mc.recover_if_dead()
+                self._revalidate_after_reconnect()
+                if self.frame_suspect:
+                    return False
+                t0 = time.time()           # don't let the reconnect delay eat the budget
             j = self.joint_position()
             okx = x is None or abs(j["X"] - int(x)) <= tol
             oky = y is None or abs(j["Y"] - int(y)) <= tol
@@ -774,6 +809,8 @@ class PhilRobot:
         packet arrived last (sometimes mid-move or stale), so one read is noisy; the
         median of a short burst is the stable position."""
         n = self.APPROACH_READS if n is None else n
+        if getattr(self.mc, "link_dead", False) and hasattr(self.mc, "recover_if_dead"):
+            self.mc.recover_if_dead()        # don't median over a frozen (dropped) stream
         xs, ys = [], []
         for _ in range(n):
             j = self.joint_position(); xs.append(j["X"]); ys.append(j["Y"]); time.sleep(dt)
@@ -1330,13 +1367,16 @@ class PhilRobot:
     def goto_well(self, well_id: str, safe=True):
         """Move to a well: exact taught position, else derived from the metric map."""
         self._require()
+        self._revalidate_after_reconnect()
         if self._scale_mismatch:
             raise RuntimeError(
                 "goto disabled: v2-scale teach data on a non-v2 backend (~32x off). "
                 "Use `--backend v2` or restore legacy-scale data.")
-        if self.frame_suspect:
-            print("  ** frame looks power-cycle-reset — `reanchor <well>` first or "
-                  "this move will be off (geometry is fine, no re-teach).")
+        if self.frame_suspect and not os.environ.get("PHIL_ALLOW_SUSPECT"):
+            raise RuntimeError(
+                f"goto BLOCKED: frame unverified after a reset/reconnect (geometry is fine, "
+                f"no re-teach). Jog onto {self.ANCHOR_WELL} and `reanchor {self.ANCHOR_WELL}` "
+                f"first (set PHIL_ALLOW_SUSPECT=1 to override).")
         tgt, taught = self._resolve_well(well_id)
         # Replay the SAME backlash engagement the well was taught with: a well finished
         # -X,-Y must be re-approached from the +side closing -X,-Y, NOT goto's default
@@ -1390,9 +1430,12 @@ class PhilRobot:
             have = ", ".join(sorted(self.teach_table.named)) or "none"
             raise KeyError(f"no named position '{nm}' (teach it with "
                            f"teach_position). Known: {have}")
-        if self.frame_suspect:
-            print("  ** frame looks power-cycle-reset — `reanchor` first or this "
-                  "move will be off.")
+        self._revalidate_after_reconnect()
+        if self.frame_suspect and not os.environ.get("PHIL_ALLOW_SUSPECT"):
+            raise RuntimeError(
+                f"goto BLOCKED: frame unverified after a reset/reconnect. Jog onto "
+                f"{self.ANCHOR_WELL} and `reanchor {self.ANCHOR_WELL}` first "
+                f"(set PHIL_ALLOW_SUSPECT=1 to override).")
         tgt = self.teach_table.joint_for_named(nm)
         fc = self.frame_correction
         if not _is_identity(fc) and _is_translation_only(fc):
