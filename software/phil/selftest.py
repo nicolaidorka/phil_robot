@@ -25,6 +25,7 @@ import serial
 import serial.tools.list_ports as lp
 
 from .robot import PhilRobot, PhilHandshakeError
+from .constants import CONTROLLER_SN
 
 LEGACY_MSG_LEN = 20
 
@@ -121,7 +122,7 @@ def main(argv=None):
             raw_feedback_probe(ctrl.device)
 
     print("\n== 3. Connect (legacy backend: reset / initialize) ==")
-    bot = PhilRobot(simulate=args.simulate, backend=args.backend)
+    bot = PhilRobot(simulate=args.simulate, backend=args.backend, controller_sn=CONTROLLER_SN)
     try:
         bot.connect()
     except PhilHandshakeError as e:

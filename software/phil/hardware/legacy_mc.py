@@ -91,19 +91,35 @@ def _s24(value: int) -> bytes:
 
 
 def find_controller(version="Teensy", sn=None):
-    for p in lp.comports():
-        if sn and p.serial_number == sn:
-            return p.device
-        if p.manufacturer == "Teensyduino" or p.description == "Arduino Due":
-            return p.device
-    return None
+    # STRICT when an SN is requested: match ONLY that serial number, and return None if
+    # it is absent (the caller raises -> fail loud). Falling back to "any Teensyduino"
+    # when an SN was given let Phil seize the MICROSCOPE's Teensy whenever it enumerated
+    # first, and Phil's jogs then drove the microscope stage (SAFETY, 2026-06-15). Two
+    # boards on the bus are indistinguishable except by SN.
+    ports = list(lp.comports())
+    if sn:
+        for p in ports:
+            if p.serial_number == sn:
+                return p.device
+        return None
+    # No SN given: auto-detect a SINGLE Teensy, but REFUSE to guess when several are
+    # present -- the microscope stage is a second Teensy, and guessing once drove it.
+    teensies = [p for p in ports
+                if p.manufacturer == "Teensyduino" or p.description == "Arduino Due"]
+    if len(teensies) > 1:
+        raise IOError(
+            "multiple Teensy controllers found and no serial number given — refusing to "
+            "guess (one of these is the microscope stage). Set PHIL_SN=<serial> or pass "
+            f"controller_sn. Found SNs: {[p.serial_number for p in teensies]}")
+    return teensies[0].device if teensies else None
 
 
 class LegacyMicrocontroller:
     def __init__(self, version="Teensy", sn=None, port=None):
         self.port = port or find_controller(version, sn)
         if self.port is None:
-            raise IOError("no Teensy/Arduino controller found")
+            raise IOError(f"Phil Teensy not found on USB (requested sn={sn!r}) — "
+                          f"refusing to auto-grab another board.")
         self.serial = serial.Serial(self.port, 2000000, timeout=1)
         time.sleep(0.2)
 

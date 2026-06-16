@@ -39,7 +39,7 @@ import time
 import tty
 
 from .robot import PhilRobot
-from .constants import DEFAULT_BACKEND
+from .constants import DEFAULT_BACKEND, CONTROLLER_SN
 
 # Jog sizes in repo usteps. The firmware moves in whole full-steps (8 usteps each,
 # ~1 mm of outlet travel near the plate), so these are multiples of 8.
@@ -50,13 +50,21 @@ DEFAULT_STEP_IDX = 1
 _keybuf = []                # decoded type-ahead keys read but not yet consumed
 
 
+# Arrow keys arrive as a multi-byte escape sequence in one of TWO encodings:
+#   CSI '\x1b[A' (normal cursor mode) and SS3 '\x1bOA' (application cursor mode).
+# Terminals/emulators differ, so we MUST accept BOTH -- mapping only CSI silently
+# dropped every arrow on terminals that send SS3 (the original bug).
+_ARROWS = {"[A": "UP", "[B": "DOWN", "[C": "RIGHT", "[D": "LEFT",
+           "OA": "UP", "OB": "DOWN", "OC": "RIGHT", "OD": "LEFT"}
+
+
 def _read_key():
     if _keybuf:
         return _keybuf.pop(0)
     ch = sys.stdin.read(1)
     if ch == "\x1b":                      # escape sequence (arrow keys)
         seq = sys.stdin.read(2)
-        return {"[A": "UP", "[B": "DOWN", "[C": "RIGHT", "[D": "LEFT"}.get(seq, "ESC")
+        return _ARROWS.get(seq, "ESC")
     if ch in ("\r", "\n"):
         return "ENTER"
     return ch
@@ -102,7 +110,8 @@ def main(argv=None):
     raw = list(argv if argv is not None else _sys.argv[1:])
     simulate = "--simulate" in raw
 
-    bot = PhilRobot(backend="sim" if simulate else DEFAULT_BACKEND, simulate=simulate)
+    bot = PhilRobot(backend="sim" if simulate else DEFAULT_BACKEND, simulate=simulate,
+                    controller_sn=CONTROLLER_SN)   # bind to Phil's board, never the microscope's
     bot.connect()
     # On v2 the joints are 32x finer (microsteps), so the legacy full-step ladder
     # tops out at ~0.5 mm -- painfully slow to cross a well during a frame recovery.
@@ -122,23 +131,27 @@ def main(argv=None):
         while True:
             step = STEPS[step_idx]
             key = _read_key()
-            if key == "UP":
+            # A jog can raise IOError if an EMI USB drop can't be auto-recovered
+            # (v2_mc retries+reopens first). Catch it so ONE bad jog never kills the
+            # whole drive session -- the operator's reanchor tool must stay alive.
+            try:
+              if key == "UP":
                 bot.jog_joint(dx=step * _coalesce(fd, "UP"))
-            elif key == "DOWN":
+              elif key == "DOWN":
                 bot.jog_joint(dx=-step * _coalesce(fd, "DOWN"))
-            elif key == "RIGHT":
+              elif key == "RIGHT":
                 bot.jog_joint(dy=step * _coalesce(fd, "RIGHT"))
-            elif key == "LEFT":
+              elif key == "LEFT":
                 bot.jog_joint(dy=-step * _coalesce(fd, "LEFT"))
-            elif key == "a":
+              elif key == "a":
                 bot.jog_joint(dz=step * _coalesce(fd, "a"))
-            elif key == "z":
+              elif key == "z":
                 bot.jog_joint(dz=-step * _coalesce(fd, "z"))
-            elif key in ("+", "="):
+              elif key in ("+", "="):
                 step_idx = min(step_idx + 1, len(STEPS) - 1)
-            elif key in ("-", "_"):
+              elif key in ("-", "_"):
                 step_idx = max(step_idx - 1, 0)
-            elif key == "r":
+              elif key == "r":
                 # Re-lock the frame to A1. Jog the nozzle onto A1's TRUE center first,
                 # then press r. Pure-translation correction -> reliable (not SET_POSITION),
                 # recovers a shifted frame with no re-teaching.
@@ -149,7 +162,7 @@ def main(argv=None):
                                      f"cy={cy:+.0f} usteps]\n")
                 except Exception as e:
                     sys.stdout.write(f"  [reanchor failed: {e}]\n")
-            elif key == "g":
+              elif key == "g":
                 name = _prompt_line(fd, old, "  go to well / named pos (e.g. D6, WASTE): ").strip().upper()
                 if name:
                     try:
@@ -159,7 +172,7 @@ def main(argv=None):
                             bot.goto_well(name)
                     except Exception as e:
                         sys.stdout.write(f"  [goto failed: {e}]\n")
-            elif key == "t":
+              elif key == "t":
                 # Log the CURRENT pose as a named off-plate position (e.g. WASTE). Does NOT
                 # touch taught wells/calibration -- adds to teach_table.named, then PERSISTS
                 # (teach_position itself does not save to disk).
@@ -168,18 +181,21 @@ def main(argv=None):
                     bot.teach_position(name)
                     bot.teach_table.save(bot.teach_path)
                     sys.stdout.write(f"  [saved '{name}' & persisted -> reach with 'g {name}' / CLI 'gotopos {name}']\n")
-            elif key == "v":
+              elif key == "v":
                 # Capture the CURRENT Z as the travel-Z lift. Jog Z ALL THE WAY UP first,
                 # THEN press v -> goto/gotopos lift to here before traversing ("up then over").
                 bot.set_travel_z()
                 bot.teach_table.save(bot.teach_path)
                 sys.stdout.write(f"\n  [travel-Z lift = {bot.teach_table.z_travel_usteps} usteps & persisted "
                                  f"-> gotopos lifts ALL the way up here first, then over]\n")
-            elif key == "p":
+              elif key == "p":
                 j = bot.joint_position()
                 sys.stdout.write(f"\n  joints: X={j['X']} Y={j['Y']} Z={j['Z']} usteps\n")
-            elif key == "q":
+              elif key == "q":
                 break
+            except IOError as e:
+                sys.stdout.write(f"\n  [jog failed: USB link issue — {e}\n"
+                                 f"   session alive; wait for re-enumerate, then retry the key]\n")
             _status(bot, STEPS[step_idx])
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)

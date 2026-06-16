@@ -27,7 +27,7 @@ import tty
 import numpy as np
 
 from .robot import PhilRobot
-from .constants import DEFAULT_BACKEND
+from .constants import DEFAULT_BACKEND, CONTROLLER_SN
 
 # Default diagnostic set: a 2-D spread of mostly-UNTAUGHT interior + edge wells (model
 # error shows here) plus a couple of taught refs (A1/D6 -> backlash baseline).
@@ -93,7 +93,7 @@ def main(argv=None):
     raw = [a for a in raw if a not in ("--v2", "--legacy", "--apply")]
     wells = [w.upper() for w in raw] or DEFAULT_WELLS
 
-    bot = PhilRobot(backend="v2" if use_v2 else "legacy")
+    bot = PhilRobot(backend="v2" if use_v2 else "legacy", controller_sn=CONTROLLER_SN)
     steps = [8, 16, 32, 64, 128, 256, 512, 1024] if use_v2 else [8, 16, 32, 64, 120]
     si = 3
     if use_v2:

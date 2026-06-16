@@ -38,7 +38,7 @@ import time
 import tty
 
 from .robot import PhilRobot
-from .constants import DEFAULT_BACKEND
+from .constants import DEFAULT_BACKEND, CONTROLLER_SN
 from .geometry.well_plate import WellPlate
 
 # Order I guide you through: 4 corners (best spread) + 2 middles to capture the
@@ -234,7 +234,8 @@ def main(argv=None):
     _NO_APPROACH = no_approach
 
     bot = PhilRobot(backend="v2" if use_v2 else "legacy",
-                    labware_path=labware, teach_path=teach)
+                    labware_path=labware, teach_path=teach,
+                    controller_sn=CONTROLLER_SN)   # bind to Phil's board, never the microscope's
     # On v2 the joint counts are 32x finer (microsteps, not full-steps), so scale
     # the jog increments to keep the same physical nudge sizes, and STAMP the teach
     # table as v2-scale so goto will accept the freshly-taught data.

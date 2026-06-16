@@ -79,40 +79,124 @@ def _s32(value: int) -> bytes:
 
 class V2Microcontroller:
     def __init__(self, version="Teensy", sn=None, port=None):
-        self.port = port or find_controller(version, sn)
-        if self.port is None:
-            raise IOError("no Teensy/Arduino controller found")
-        self.serial = serial.Serial(self.port, 2000000, timeout=1)
-        # Single-instance guard: take an exclusive advisory lock on the port so a SECOND
-        # phil program can't open the same /dev/ttyACM. Two opens interleave their bytes
-        # into garbage move commands and can JAM the arm (hit live 2026-06-15). The lock is
-        # tied to this fd -> released automatically on close()/process exit (no stale
-        # lockfile). Set PHIL_NO_PORT_LOCK=1 to bypass (deliberate multi-tool debugging).
-        if not os.environ.get("PHIL_NO_PORT_LOCK"):
-            try:
-                fcntl.flock(self.serial.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                self.serial.close()
-                raise IOError(
-                    f"{self.port} is already in use by another Phil program — quit the "
-                    f"other CLI / drive / jog_teach first. Two programs on one serial port "
-                    f"send the firmware garbage and can jam the arm.")
-        # set True if the USB link drops mid-session (EMI) so waiters fail fast instead of
-        # burning the full move timeout on every command (~20s each -> minutes of "hang").
-        self.link_dead = False
-        time.sleep(0.2)
+        self._version = version
+        self._sn = sn
+        self._fixed_port = port                 # explicit pin (rare); else re-resolve by SN
+        # Reconnect machinery: EMI from the (powered) steppers can drop the USB link mid-
+        # session -> the Teensy RE-ENUMERATES (counter usually survives) and may flip ACMx.
+        # _send then auto-reopens (STRICTLY by SN via find_controller) and re-sends the same
+        # frame; robot.py re-validates the frame after each reconnect. Tunable via env.
+        self._reconnect_lock = threading.Lock()
+        self._reconnect_epoch = 0               # bumped on every successful reopen
+        self.counter_reset_after_reconnect = False
+        self._reconnect_timeout_s = float(os.environ.get("PHIL_RECONNECT_TIMEOUT_S", "10"))
+        self._write_retries = int(os.environ.get("PHIL_WRITE_RETRIES", "3"))
+        self._reconnect_drift_usteps = int(os.environ.get("PHIL_RECONNECT_DRIFT_USTEPS", "500"))
 
         self._cmd_id = 0
         self.mcu_cmd_execution_in_progress = False
-
         self.x_pos = self.y_pos = self.z_pos = self.theta_pos = 0
         self.button_and_switch_state = 0
-
+        self._rx_count = 0                       # parsed-packet counter (fresh-read detection)
         self._buf = bytearray()
         self._lock = threading.Lock()
         self._stop = False
+        self._reader = None
+        # set True if the USB link drops mid-session (EMI) so waiters fail fast instead of
+        # burning the full move timeout; cleared again once _reopen() recovers the link.
+        self.link_dead = False
+
+        self._open_port()                        # opens self.serial + flock (raises if absent/busy)
+        time.sleep(0.2)
+        self._start_reader()
+
+    # ----------------------------------------------------- link open / reopen
+    def _open_port(self):
+        """Resolve (STRICTLY by SN) + open the serial port and take the exclusive
+        single-instance flock. Sets self.serial / self.port. Raises if the SN device is
+        absent (fail loud — never grab another board) or the port is already held.
+
+        Single-instance guard: an exclusive advisory lock so a SECOND phil program can't
+        open the same /dev/ttyACM. Two opens interleave bytes into garbage move commands
+        and can JAM the arm (hit live 2026-06-15). Tied to this fd -> released on
+        close()/exit. Set PHIL_NO_PORT_LOCK=1 to bypass (deliberate multi-tool debugging)."""
+        port = self._fixed_port or find_controller(self._version, self._sn)
+        if port is None:
+            raise IOError(f"Phil Teensy not found on USB (requested sn={self._sn!r}) — "
+                          f"refusing to auto-grab another board.")
+        ser = serial.Serial(port, 2000000, timeout=1)
+        if not os.environ.get("PHIL_NO_PORT_LOCK"):
+            try:
+                fcntl.flock(ser.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                ser.close()
+                raise IOError(
+                    f"{port} is already in use by another Phil program — quit the "
+                    f"other CLI / drive / jog_teach first. Two programs on one serial port "
+                    f"send the firmware garbage and can jam the arm.")
+        self.serial = ser
+        self.port = port
+
+    def _start_reader(self):
+        self._stop = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
+
+    def _reopen(self):
+        """Re-establish the link after an EMI-induced USB re-enumeration. The Teensy keeps
+        its position counter across a re-enumerate, so we only reopen the byte pipe
+        (STRICTLY by SN) -- NO INITIALIZE/zero (that would snap + risk the frame). Then we
+        detect whether the firmware counter SURVIVED (-> resume) or was RESET (-> robot.py
+        blocks goto until reanchor): compare the last pre-drop counter to the first fresh
+        post-reopen read, defaulting to RESET unless a fresh read confirms it survived.
+        Returns True once the link is back, False if it never returns within the timeout."""
+        with self._reconnect_lock:
+            if not self.link_dead:
+                return True                      # another caller already recovered it
+            with self._lock:                     # last good parsed counter (pre-drop)
+                pre_x, pre_y = self.x_pos, self.y_pos
+            # tear down the dead reader + old fd (closing the fd frees the flock)
+            self._stop = True
+            r = self._reader
+            if r is not None and r is not threading.current_thread():
+                try:
+                    r.join(timeout=1)
+                except Exception:
+                    pass
+            try:
+                self.serial.close()
+            except Exception:
+                pass
+            deadline = time.time() + self._reconnect_timeout_s
+            while time.time() < deadline:        # node may take ~1-3s to reappear / flip ACMx
+                try:
+                    self._open_port()            # strict SN resolve + fresh flock
+                except IOError:
+                    time.sleep(0.3)
+                    continue
+                self._buf = bytearray()          # fresh stream: drop stale partial bytes
+                self.mcu_cmd_execution_in_progress = False
+                self.link_dead = False
+                rx0 = self._rx_count
+                self._start_reader()
+                # Wait for a FRESH packet, then compare the counter. Default SUSPECT until a
+                # fresh read confirms the counter survived (never report a false "intact").
+                self.counter_reset_after_reconnect = True
+                t_end = time.time() + 1.5
+                while time.time() < t_end:
+                    if self._rx_count > rx0:
+                        with self._lock:
+                            post_x, post_y = self.x_pos, self.y_pos
+                        drift = abs(post_x - pre_x) + abs(post_y - pre_y)
+                        self.counter_reset_after_reconnect = drift > self._reconnect_drift_usteps
+                        break
+                    time.sleep(0.05)
+                self._reconnect_epoch += 1
+                tag = ("counter RESET -> reanchor needed"
+                       if self.counter_reset_after_reconnect else "counter intact")
+                print(f"  [usb link dropped (EMI) -> reconnected on {self.port}; {tag}]")
+                return True
+            return False                         # never came back -> caller raises loud
 
     # --------------------------------------------------------------- reader
     def _read_loop(self):
@@ -171,22 +255,37 @@ class V2Microcontroller:
             self.z_pos = int.from_bytes(pk[oz:oz + 4], "big", signed=True)
             self.theta_pos = 0           # firmware never writes the theta bytes
             self.button_and_switch_state = pk[SWITCH_BYTE]
+            self._rx_count += 1          # fresh-packet tick (post-reopen counter check)
         del buf[:last_off]
 
     # -------------------------------------------------------------- sending
     def _send(self, opcode, p0=0, p1=0, p2=0, p3=0, p4=0, expect_ack=True):
+        # Build the frame ONCE (one cmd_id). On an EMI write-failure the bytes never left
+        # the host (Errno 5), so the firmware never saw this frame -> re-sending the SAME
+        # frame after a reopen is safe (no double-move, relative or absolute), and the
+        # firmware's CRC-8 rejects any torn frame anyway. Bounded retries; raise loud if
+        # the device never returns. PHIL_WRITE_RETRIES tunes the count.
         self._cmd_id = (self._cmd_id + 1) % 256
         body = bytes([self._cmd_id, opcode,
                       p0 & 0xFF, p1 & 0xFF, p2 & 0xFF, p3 & 0xFF, p4 & 0xFF])
         frame = body + bytes([crc8(body)])
-        if expect_ack:
-            self.mcu_cmd_execution_in_progress = True
-        try:
-            self.serial.write(frame)
-        except Exception as e:                 # USB dropped mid-write -> don't hang, surface it
-            self.link_dead = True
-            self.mcu_cmd_execution_in_progress = False
-            raise IOError(f"serial write to {self.port} failed (link dropped?): {e}") from e
+        last_err = None
+        for attempt in range(self._write_retries + 1):
+            if expect_ack:
+                self.mcu_cmd_execution_in_progress = True
+            try:
+                self.serial.write(frame)
+                return
+            except Exception as e:             # USB dropped mid-write -> reopen + re-send
+                last_err = e
+                self.link_dead = True
+                self.mcu_cmd_execution_in_progress = False
+                if attempt < self._write_retries and self._reopen():
+                    continue                   # link back -> re-send the same frame
+                break
+        raise IOError(f"serial write to {self.port} failed after "
+                      f"{self._write_retries + 1} attempt(s) (USB link down — "
+                      f"check cable/EMI): {last_err}") from last_err
 
     def _send_pos(self, opcode, microsteps):
         # v2 commands directly in microsteps -- NO full-step rounding (the fix).
@@ -232,10 +331,20 @@ class V2Microcontroller:
     def wait_till_operation_is_completed(self, timeout=5):
         t0 = time.time()
         while self.is_busy() and time.time() - t0 < timeout:
-            if self.link_dead:               # USB dropped -> stop waiting on a reply that won't come
-                break
+            if self.link_dead:               # USB dropped (EMI) -> recover the link instead of
+                self._reopen()               # just bailing; the firmware finishes the absolute
+                break                        # move on its own, the caller then confirms arrival
             time.sleep(0.01)
         self.mcu_cmd_execution_in_progress = False
+
+    def recover_if_dead(self):
+        """Reopen the link if it has dropped (EMI). Safe from any non-reader thread
+        (single-flight via _reopen's lock). Lets pure-polling callers (e.g. position
+        confirm) survive a drop that happens with no command in flight. Returns True
+        if the link is up afterwards."""
+        if self.link_dead:
+            return self._reopen()
+        return True
 
     # ----------------------------------------------------- lifecycle/config
     def reset(self):
